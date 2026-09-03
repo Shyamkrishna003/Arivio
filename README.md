@@ -23,19 +23,57 @@ The core of the system is a **personalization engine** that turns a product's la
 
 ### Prerequisites
 
-- Node.js 18+
-- Python 3.11+
-- Docker & Docker Compose
+- Docker & Docker Compose (Option A needs nothing else)
+- Node.js 18+ (Option B)
+- Python 3.11+ (Option B)
 
-### 1. Start Infrastructure
+### Option A — Everything in Docker
 
 ```bash
-docker-compose up -d
+cp backend/.env.example backend/.env   # add AI_API_KEY if you have one
+docker compose up --build
 ```
 
-This starts PostgreSQL (with pgvector) and Redis.
+| Service | URL |
+|---|---|
+| Frontend | http://localhost:5173 |
+| Backend | http://localhost:8000 |
+| API docs | http://localhost:8000/docs |
+| PostgreSQL | `localhost:5433` |
+| Redis | `localhost:6379` |
 
-### 2. Backend Setup
+Migrations run automatically on backend start. Both source trees are
+bind-mounted, so uvicorn `--reload` and Vite HMR pick up edits without a
+rebuild — rebuild only when `requirements.txt` or `package.json` changes:
+
+```bash
+docker compose up --build backend    # after a dependency change
+docker compose logs -f backend       # follow logs
+docker compose down -v               # stop and wipe volumes
+```
+
+Notes on the compose setup:
+
+- Inside the network, services resolve each other by name (`postgres:5432`,
+  `redis:6379`). `VITE_API_URL` instead points at `localhost:8000`, because it
+  is resolved by your **browser**, not by the frontend container.
+- `backend/.env` is loaded if present but the compose `environment` block wins,
+  so a local `DATABASE_URL` pointing at `localhost` cannot break the container.
+- The frontend serves plain HTTP in Docker (`VITE_HTTPS=false`). Vite's dev
+  server otherwise uses a self-signed certificate, and an HTTPS page cannot call
+  the HTTP backend without the browser blocking it as mixed content.
+- Ports 5173 and 8000 must be free — stop any local `npm run dev` / `uvicorn`
+  first.
+
+### Option B — Run services locally
+
+Start only the infrastructure:
+
+```bash
+docker compose up -d postgres redis
+```
+
+#### Backend
 
 ```bash
 cd backend
@@ -52,7 +90,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 API docs available at: http://localhost:8000/docs
 
-### 3. Frontend Setup
+#### Frontend
 
 ```bash
 cd frontend
@@ -62,7 +100,7 @@ npm run dev
 
 App available at: http://localhost:5173
 
-### 4. Configuration
+### Configuration
 
 `backend/.env` (git-ignored — never commit real keys):
 
