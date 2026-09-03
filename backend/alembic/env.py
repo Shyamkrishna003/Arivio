@@ -22,10 +22,21 @@ from app.products.models import *
 from app.ingredients.models import *
 from app.community.models import *
 from app.ai.models import *
+from app.allergens.models import *
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# Prefer the application's configured DATABASE_URL over the static value in
+# alembic.ini, so the same migrations run unchanged locally and in Docker
+# (where the database host is "postgres", not "localhost").
+from app.core.config import get_settings
+
+_db_url = os.environ.get("DATABASE_URL") or get_settings().DATABASE_URL
+if _db_url:
+    # set_main_option applies %-interpolation; escape so passwords survive.
+    config.set_main_option("sqlalchemy.url", _db_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
