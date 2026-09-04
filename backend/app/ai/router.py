@@ -12,7 +12,9 @@ from sqlalchemy import select
 
 from app.db.session import get_db
 from app.core.security import get_current_user
-from app.users.models import User, UserGoal, UserAllergy, CustomGoalProfile
+from app.users.models import (
+    User, UserGoal, UserAllergy, CustomGoalProfile, UserProfile, UserPreference,
+)
 from app.products.models import (
     Product, NutritionFact, ProductAllergen, ProductIngredient
 )
@@ -126,6 +128,24 @@ async def get_ai_report(
         for a in allergies_result.scalars().all()
     ]
 
+    # ── Load nutrient preferences ──
+    prefs_result = await db.execute(
+        select(UserPreference).where(UserPreference.user_id == current_user.id)
+    )
+    user_preferences = [
+        {"preference_type": p.preference_type, "is_hard_constraint": p.is_hard_constraint}
+        for p in prefs_result.scalars().all()
+    ]
+
+    # ── Dietary pattern (hard constraint) ──
+    profile_row = (await db.execute(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    )).scalar_one_or_none()
+    dietary_pattern = (
+        profile_row.dietary_pattern.value
+        if profile_row and profile_row.dietary_pattern else None
+    )
+
     # ── AI fallback for allergens the synonym tables don't cover ──
     inferred_allergen_matches = {}
     unresolved = find_unresolved_allergens(
@@ -148,9 +168,10 @@ async def get_ai_report(
         product_ingredients=product_ingredients,
         user_goals=user_goals,
         user_allergies=user_allergies,
-        user_preferences=[],
+        user_preferences=user_preferences,
         custom_profiles=custom_profiles,
         inferred_allergen_matches=inferred_allergen_matches,
+        dietary_pattern=dietary_pattern,
     )
 
     # Convert flags and goal_alignments to dicts for the gateway

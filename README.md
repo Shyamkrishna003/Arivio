@@ -132,16 +132,21 @@ keeps it fully testable without a database or network.
 ```mermaid
 flowchart TD
     A[Product label + user profile] --> B[1. Allergen check]
-    B --> C[2. Goal alignment]
+    B --> B2[1b. Dietary pattern]
+    B2 --> C[2. Goal alignment]
     C --> D[3. Nutritional quality]
     D --> E[4. Ingredient profile]
-    E --> F[Weighted composite]
+    E --> E2[5. Nutrient preferences]
+    E2 --> F[Weighted composite]
     F --> G{Allergen conflict?}
     G -- confirmed --> H[Hard cap 15 / 30]
     G -- trace --> I[Cap 45, x0.6]
     G -- preference --> J[x0.9 - 5]
     G -- none --> K[Score stands]
-    H & I & J & K --> L[Score + verdict + flags]
+    H & I & J & K --> M{Diet incompatible?}
+    M -- yes --> N[Hard cap 15]
+    M -- no --> L[Score + verdict + flags]
+    N --> L
 ```
 
 ### 1. Allergen check — three resolution tiers
@@ -176,6 +181,15 @@ ALLERGEN_CATEGORIES = {
 Matching is length-aware: terms of **5+ characters** match as substrings (so
 `butter` catches `buttermilk`), while shorter terms require **word boundaries**
 (so `egg` does not match `eggplant`, and `cod` does not match `cocoa`).
+
+Dairy words are the exception, because substring matching gets them badly
+wrong: `butter` matched `peanut butter`, `cocoa butter` and `shea butter`, and
+`milk` matched every plant milk — each one capping the score at 15 and telling a
+milk-allergic user that almond milk contains milk. `butter`, `milk`, `cream`,
+`cheese` and `yog(h)urt` are therefore ignored when preceded by a plant source
+(`almond`, `coconut`, `soy`, `oat`, `cocoa`, `shea`, …). A bare or compound
+occurrence still counts, so `buttermilk`, `milk solids` and `butter oil` are
+unaffected.
 
 Free-text input falls back to token matching — `"Sesame Seeds"` resolves via the
 `sesame` token. Bigrams are tried before single words so `"brazil nut"` matches
@@ -213,6 +227,46 @@ A soft preference lowers the score but keeps the product recommendable. Severity
 is collected across **every** conflict at the worst level, so the cap only
 softens when all of them are mild — the result never depends on the order
 allergies were added.
+
+### 1b. Dietary pattern — the second hard constraint
+
+A declared dietary pattern rules a product out on composition, the same way an
+allergen does. A vegan product containing gelatin is not "slightly less
+suitable" — it does not qualify — so an incompatible product is **capped at 15**
+regardless of how well it scores nutritionally.
+
+| Pattern | Excludes |
+|---|---|
+| `vegan` | meat, fish, shellfish, dairy, egg, animal-derived, bee products |
+| `vegetarian` | meat, fish, shellfish, egg, animal-derived |
+| `eggetarian` | meat, fish, shellfish, animal-derived |
+| `pescatarian` | meat, animal-derived |
+| `omnivore`, `other` | nothing |
+
+Dairy, egg, fish and shellfish reuse the allergen tables rather than duplicating
+them, so a term added for allergen coverage improves diet matching for free.
+
+Two deliberate decisions:
+
+- **The vegetarian/eggetarian split follows Indian usage**, which is what this
+  catalogue is built around (the ingredient tables carry ghee, paneer, maida,
+  vanaspati). `vegetarian` excludes eggs; `eggetarian` is the pattern that
+  permits them. Western lacto-ovo vegetarians should select eggetarian.
+- **`keto` is not treated here.** It is a macronutrient target, not an
+  ingredient-exclusion list, and belongs in goal alignment where carbohydrate
+  thresholds already live. Excluding foods on that basis would be the wrong
+  mechanism entirely.
+
+Genuinely ambiguous ingredients — `mono- and diglycerides`, `glycerin`, `E471`,
+`rennet`, `collagen` — raise a **"check the label"** warning and deliberately
+**do not change the score**. They are plant-derived more often than not, and a
+guess that lowers a score reads as a finding.
+
+`diet_compatible` is reported separately from `allergen_safe`: one is a
+compatibility question, the other a safety one, and a caller filtering for
+allergen safety should not silently inherit dietary filtering. Both can be false
+at once, in which case the allergen verdict leads. The UI shows a compatibility
+issue as its own banner rather than leaving it to be inferred from the number.
 
 ### 2. Goal alignment — three resolution tiers
 
@@ -307,6 +361,49 @@ first three, next three, and remainder. Penalties cap at 45 and bonuses at 25.
 
 The last two rows contain similar ingredients in opposite order — position
 weighting is what separates them.
+
+### 5. Nutrient preferences — soft, unless marked strict
+
+A preference sits between a goal and a hard constraint. A goal is a whole
+nutritional profile (`heart health` also weighs saturated fat, total fat and
+cholesterol); a preference is **one nutrient** the user asked us to watch.
+Without these, the only way to say "I want low sodium" was to adopt a goal that
+drags in four other thresholds.
+
+| Preference | Nutrient | Good | Bad |
+|---|---|---|---|
+| `low_sugar` | `total_sugars_g` | <= 5g | >= 22.5g |
+| `low_sodium` | `sodium_mg` | <= 120mg | >= 600mg |
+| `low_fat` | `total_fat_g` | <= 3g | >= 17.5g |
+| `low_saturated_fat` | `saturated_fat_g` | <= 1.5g | >= 5g |
+| `high_protein` | `protein_g` | >= 15g | <= 3g |
+| `high_fiber` | `fiber_g` | >= 6g | <= 1.5g |
+
+Thresholds follow front-of-pack traffic-light bands per 100g. Each preference
+contributes **+6 when satisfied, -8 when violated**, interpolated between —
+asymmetric because failing what the user explicitly asked for matters more than
+meeting it. The total swing is capped at **+/-15** so a handful of preferences
+cannot swamp the nutritional assessment underneath.
+
+```text
+no preferences                 52
+low sugar (violated)           44   -8   soft
++ high protein (met)           50   -2   soft
+low sugar marked strict        25        strict  <- capped
+```
+
+**Strict** escalates a preference to a hard constraint, capping the score at
+**25** — deliberately above the allergen (15) and dietary (15) ceilings, so the
+three remain distinguishable by score alone and a self-imposed limit never
+outranks a safety one.
+
+Two rules keep this honest:
+
+- A preference whose nutrient is **absent from the label is skipped**, never
+  counted as satisfied — missing data must not earn a bonus.
+- `preference_type` is validated against the table above. Free text used to be
+  accepted and then silently ignored at scoring time, which is worse than
+  refusing it: the user believes a preference is being applied when it is not.
 
 ### Composite score
 
@@ -442,13 +539,99 @@ change approach materially.
 
 ---
 
+## Community Experiences
+
+Real-world reports of what happened after using a product, kept deliberately
+separate from the label-derived score above it. Three rules from the product
+requirements shape the implementation.
+
+### It starts empty, and says so
+
+Nothing is seeded, simulated or backfilled. A product with no reports says it
+has none rather than implying a consensus, and below five reports the UI shows
+raw counts instead of percentages — "100% reported headaches" off a single
+review reads as a finding rather than one person's account.
+
+### People Like You, not most-liked
+
+The differentiating feature is not a popularity list. Each experience carries
+the anonymised context its author consented to share, scored against the
+reader's own profile by `app/community/similarity.py` — deterministic, no model
+call, so the same pair always yields the same explanation.
+
+| Dimension | Weight |
+|---|---|
+| Health context | 30% *(specified, no field to store it yet)* |
+| Allergy / intolerance | 25% |
+| Dietary pattern | 15% |
+| Goal | 10% |
+| Activity level | 10% |
+| Age range | 5% |
+| Usage duration | 5% |
+
+Age range, dietary pattern and activity level are collected by the **About You**
+panel on the profile page, which reads its options from `/profile/options` so the
+dropdowns cannot drift from what the API validates — or from the ordered scale
+relevance compares age bands on.
+
+Only dimensions **both** sides disclosed are scored, and the weights are
+renormalised over those — a reader who shared little is not penalised for what
+they withheld; the match simply rests on less, and the untouched dimensions are
+reported as "not compared". Goals are compared after alias resolution, so
+`bulking` matches `muscle gain`. Ordinal dimensions give partial credit to
+adjacent bands: `very active` and `moderately active` are closer than `very
+active` and `sedentary`.
+
+A match needs both a score above `0.35` **and** at least two agreeing
+dimensions. One coincidence is not a similar profile.
+
+**Relevance is always explained.** A bare "Similarity: 87%" is not an
+acceptable answer, so every match ships the dimensions that agreed *and* the
+ones that differ — the differences are never trimmed to make a match look
+stronger. The UI frames these as *"A user with a similar profile reported..."*,
+never as an outcome the reader should expect.
+
+### An experience is not evidence
+
+Overall and personalized aggregates are reported as separate figures, and every
+aggregate carries the statement that these are personal experiences which do
+not establish causation. The engine never converts a community signal into a
+claim about the product.
+
+### Privacy
+
+Identity, private context and community contribution stay separate. No response
+in this module carries the author's identity. Context sharing is opt-in twice
+over — the account's privacy settings (`GET`/`PUT /profile/privacy`) and a
+per-review checkbox — and a review can never share more than the profile
+permits. Health context is never shared. Withdrawing consent and re-submitting
+strips the context already attached.
+
+### Manipulation prevention
+
+| Guard | Mechanism |
+|---|---|
+| Duplicate experiences | One review per user per product (`uq_community_review_user_product`); re-submitting updates it |
+| Vote stuffing | A row per voter (`uq_review_vote_user_review`); counts are recomputed from rows, never incremented |
+| Spam / bot content | Links, contact details, promotional phrasing, shouting, character and word repetition |
+| Burst submission | More than 5 reviews from one account in 10 minutes |
+| Abuse | Reports accumulate; at 3 the review is withdrawn from the public aggregate pending moderation |
+| Self-dealing | You cannot vote on or report your own experience |
+
+A review that trips a check is **held, not discarded** — it stays visible to its
+author with the reason, and stays out of the public aggregate. Hiding someone's
+genuine experience on a false positive is a real cost, and there is no moderator
+queue to drain, so clean reviews publish immediately.
+
+---
+
 ## Project Structure
 
 ```
 arivio/
 ├── frontend/                   # React + TypeScript + Vite
 │   └── src/
-│       ├── components/         # Reusable UI components
+│       ├── components/         # Navbar, CommunitySection
 │       ├── pages/              # Profile, ProductDetail, ProductSubmit, Scan, Dashboard
 │       ├── services/api.ts     # Axios client + token-refresh interceptor
 │       ├── store/slices/       # Redux Toolkit slices
@@ -494,13 +677,25 @@ arivio/
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` `PUT` | `/api/v1/profile` | Get / update profile |
+| `GET` `PUT` | `/api/v1/profile` | Get / update profile (age range, dietary pattern, activity level) |
+| `GET` | `/api/v1/profile/options` | Accepted values for those fields — the UI builds its dropdowns from this |
 | `GET` | `/api/v1/profile/dashboard` | Dashboard summary |
 | `POST` `DELETE` | `/api/v1/profile/goals[/{id}]` | Manage goals — `409` if the goal (or an alias of it) is already active |
 | `POST` `DELETE` | `/api/v1/profile/allergies[/{id}]` | Manage allergies — `409` on an exact repeat of the same allergen and type |
-| `POST` `DELETE` | `/api/v1/profile/preferences[/{id}]` | Manage preferences |
+| `POST` `DELETE` | `/api/v1/profile/preferences[/{id}]` | Manage nutrient preferences — re-posting updates strictness rather than duplicating |
 | `GET` | `/api/v1/profile/allergens/known` | Canonical allergen names (autocomplete) |
 | `POST` | `/api/v1/profile/history/{product_id}` | Record a scan |
+| `GET` `PUT` | `/api/v1/profile/privacy` | Anonymous context-sharing consent (opt-in; all off by default) |
+
+### Community
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/community/products/{product_id}` | Aggregates + relevant experiences (auth optional; personalization needs a profile) |
+| `POST` | `/api/v1/community/reviews` | Share an experience — one per user per product, re-submitting updates it |
+| `DELETE` | `/api/v1/community/reviews/{id}` | Withdraw your own experience |
+| `POST` | `/api/v1/community/reviews/{id}/vote` | Helpful / not helpful — one vote per reader, changeable |
+| `POST` | `/api/v1/community/reviews/{id}/flag` | Report for moderation — accumulates to a threshold |
 
 ### Products
 
@@ -515,7 +710,7 @@ arivio/
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/v1/personalization/suitability/{product_id}` | Personal Suitability Score |
+| `GET` | `/api/v1/personalization/suitability/{product_id}` | Personal Suitability Score (incl. `diet_compatible`) |
 | `GET` | `/api/v1/personalization/alternatives/{product_id}` | Better-matching alternatives |
 | `GET` | `/api/v1/ai/report/{product_id}` | Natural-language report |
 | `POST` | `/api/v1/ai/feedback` | Submit report feedback |
@@ -577,6 +772,11 @@ Key tables beyond the obvious:
 | `allergen_inferences` | Cached AI allergen verdicts |
 | `report_feedback` | Ratings and comments on AI reports |
 | `user_scan_history` | Scan history for the dashboard |
+| `community_reviews` | One experience per user per product |
+| `review_contexts` | The anonymised context an author consented to share |
+| `review_votes` | Helpful votes, one row per voter |
+| `review_flags` | Abuse reports, one row per reporter |
+| `privacy_settings` | Per-attribute context-sharing consent |
 
 `goal_type` is stored **normalized** (lowercased, `-`/`_` → space) on write, so it
 matches both hardcoded profile keys and generated rows.
@@ -609,16 +809,21 @@ alembic history               # full chain
 
 ```bash
 cd backend
-./venv/bin/python test/test_engine_regression.py   # 77 assertions, no DB required
+./venv/bin/python test/test_engine_regression.py   # 132 assertions, no DB required
+./venv/bin/python test/test_community.py           # 41 assertions, no DB required
 ./venv/bin/python test/test_scoring.py             # scoring smoke test
 ```
 
 `test_engine_regression.py` is the safety net for the engine and covers goal
 alias resolution, allergen false positives (`egg` vs `eggplant`), category
 isolation (`cashew` vs `almond`), conflict tiers, order-independent severity,
-ingredient quality ordering, cache-key composition, the per-100g wording and
-rounding of nutrition flags, the rule that an unscored goal is never rendered as
-`None/100`, and the rule that **AI can never clear a literal allergen match**.
+ingredient quality ordering, nutrient preferences (soft vs strict, the +/-15
+cap, and skipping what the label cannot measure), cache-key composition, the
+per-100g wording and
+rounding of nutrition flags, dietary-pattern exclusions per pattern, the
+plant-qualifier rule that keeps `almond milk` out of a milk allergy, the rule
+that an unscored goal is never rendered as `None/100`, and the rule that **AI
+can never clear a literal allergen match**.
 
 Frontend type checking:
 

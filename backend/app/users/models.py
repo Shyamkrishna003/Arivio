@@ -39,6 +39,13 @@ class DietaryPattern(str, enum.Enum):
     OTHER = "other"
 
 
+# The age bands offered in the UI. Kept as a constant rather than free text
+# because community relevance compares them on an ordered scale — a value
+# outside this set cannot be placed on that scale and silently stops
+# contributing to the match.
+AGE_RANGES = ["under 18", "18-24", "25-34", "35-44", "45-54", "55-64", "65+"]
+
+
 class AllergyType(str, enum.Enum):
     ALLERGY = "allergy"
     INTOLERANCE = "intolerance"

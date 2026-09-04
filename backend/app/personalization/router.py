@@ -8,7 +8,9 @@ from sqlalchemy import select
 
 from app.db.session import get_db
 from app.core.security import get_current_user
-from app.users.models import User, UserGoal, UserAllergy, UserPreference, CustomGoalProfile
+from app.users.models import (
+    User, UserGoal, UserAllergy, UserPreference, CustomGoalProfile, UserProfile,
+)
 from app.products.models import (
     Product, NutritionFact, ProductAllergen, ProductIngredient
 )
@@ -123,6 +125,15 @@ async def get_suitability(
         for p in prefs_result.scalars().all()
     ]
 
+    # ── Dietary pattern (hard constraint) ──
+    profile_row = (await db.execute(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    )).scalar_one_or_none()
+    dietary_pattern = (
+        profile_row.dietary_pattern.value
+        if profile_row and profile_row.dietary_pattern else None
+    )
+
     # ── AI fallback for allergens the synonym tables don't cover ──
     # Only for allergens with no known synonyms AND no literal hit, where a
     # clean result would otherwise prove nothing. Cached per (allergen,
@@ -152,6 +163,7 @@ async def get_suitability(
             user_preferences=user_preferences,
             custom_profiles=custom_profiles,
             inferred_allergen_matches=inferred_allergen_matches,
+            dietary_pattern=dietary_pattern,
         )
     except Exception as e:
         import traceback
@@ -164,6 +176,7 @@ async def get_suitability(
         verdict=result.verdict,
         confidence=result.confidence,
         allergen_safe=result.allergen_safe,
+        diet_compatible=result.diet_compatible,
         flags=[
             {
                 "flag_type": f.flag_type,
@@ -243,6 +256,15 @@ async def get_alternatives(
     prefs_result = await db.execute(select(UserPreference).where(UserPreference.user_id == current_user.id))
     user_preferences = [{"preference_type": p.preference_type, "is_hard_constraint": p.is_hard_constraint} for p in prefs_result.scalars().all()]
 
+    # ── Dietary pattern (hard constraint) ──
+    profile_row = (await db.execute(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    )).scalar_one_or_none()
+    dietary_pattern = (
+        profile_row.dietary_pattern.value
+        if profile_row and profile_row.dietary_pattern else None
+    )
+
     # ── Score the original product itself ──
     # "Alternatives" only means something relative to what the user is already
     # looking at — without this, a flat score threshold could surface a
@@ -311,6 +333,7 @@ async def get_alternatives(
             user_preferences=user_preferences,
             custom_profiles=custom_profiles,
             inferred_allergen_matches=orig_inferred,
+            dietary_pattern=dietary_pattern,
         )
         original_score = original_suitability.overall_score
     except Exception:
@@ -411,6 +434,7 @@ async def get_alternatives(
                 user_preferences=user_preferences,
                 custom_profiles=custom_profiles,
                 inferred_allergen_matches=inferred,
+                dietary_pattern=dietary_pattern,
             )
         except Exception:
             continue
@@ -418,8 +442,12 @@ async def get_alternatives(
         # Only suggest if it's safe, meets a reasonable quality floor, and
         # actually scores higher than the product the user is looking at —
         # matching the "these products scored higher" claim shown in the UI.
+        # diet_compatible is stated explicitly rather than relied on through
+        # the score cap: recommending a product the user's dietary pattern
+        # rules out should not depend on a threshold happening to exclude it.
         if (
             suitability.allergen_safe
+            and suitability.diet_compatible
             and suitability.overall_score >= 70
             and suitability.overall_score > original_score
         ):

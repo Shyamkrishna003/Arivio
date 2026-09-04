@@ -32,6 +32,13 @@ class SuitabilityBreakdown(BaseModel):
     nutritional_quality: int
     ingredient_profile: int
     allergen_conflict: str = "none"
+    # "none" | "uncertain" | "incompatible" — whether the product clashes with
+    # the user's declared dietary pattern.
+    diet_conflict: str = "none"
+    # "none" | "soft" | "strict" — whether a nutrient preference was missed,
+    # and the net points preferences moved the score by.
+    preference_conflict: str = "none"
+    preference_adjustment: int = 0
     unscored_goals: list[str] = []
     weights: dict
 
@@ -42,6 +49,10 @@ class SuitabilityResponse(BaseModel):
     verdict: str
     confidence: int
     allergen_safe: bool
+    # False when the product contains something the dietary pattern excludes.
+    # Reported separately from allergen safety: one is a compatibility
+    # question, the other a safety one.
+    diet_compatible: bool = True
     flags: list[SuitabilityFlagResponse]
     goal_alignments: list[GoalAlignmentResponse]
     nutritional_quality_score: int

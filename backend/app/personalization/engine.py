@@ -5,10 +5,20 @@ This module calculates a Personal Suitability Score (0-100) for a product
 based on a user's health profile (goals, allergies, preferences).
 
 The scoring pipeline:
-1. Allergen Check (Hard Constraints) — instant disqualification or graded penalty
-2. Goal Alignment (Soft Constraints) — nutritional alignment with user goals
-3. Nutritional Quality Index — general nutritional quality assessment
-4. Ingredient Profile Score — quality of ingredient composition
+1.  Allergen Check (hard constraint) — disqualification or graded penalty
+1b. Dietary Pattern (hard constraint) — composition the pattern excludes
+2.  Goal Alignment (soft) — nutritional alignment with the user's goals
+3.  Nutritional Quality Index — general nutritional quality assessment
+4.  Ingredient Profile Score — quality of ingredient composition
+5.  Nutrient Preferences (soft, or hard when marked strict) — the individual
+    nutrients the user asked us to watch
+
+Three kinds of constraint, kept distinct because they answer different
+questions and a caller filtering on one must not silently inherit another:
+
+    allergen_safe     — is this safe for me?
+    diet_compatible   — does this fit what I eat?
+    preference_*      — does this match what I asked for?
 """
 
 import re
@@ -24,7 +34,7 @@ from typing import Optional
 class SuitabilityFlag:
     """A single flag raised by the engine."""
     flag_type: str        # "danger", "warning", "positive", "info"
-    category: str         # "allergen", "nutrition", "ingredient", "goal"
+    category: str         # "allergen", "diet", "nutrition", "ingredient", "goal", "preference"
     title: str
     description: str
     impact: int           # Score impact (negative = bad, positive = good)
@@ -47,6 +57,11 @@ class SuitabilityResult:
     verdict: str                                # Human-readable verdict
     confidence: int                             # 0-100 confidence in the score
     allergen_safe: bool                         # True if no allergen conflicts
+    # False when the product contains something the user's dietary pattern
+    # excludes. Kept separate from allergen_safe: one is a safety question, the
+    # other a compatibility one, and conflating them would let a caller
+    # filtering for allergen safety silently inherit dietary filtering too.
+    diet_compatible: bool = True
     flags: list[SuitabilityFlag] = field(default_factory=list)
     goal_alignments: list[GoalAlignment] = field(default_factory=list)
     nutritional_quality_score: int = 50
@@ -171,6 +186,78 @@ GOAL_PROFILES = {
     },
 }
 
+# ──────────────────────────────────────────────
+# Nutrient Preferences (soft constraints)
+# ──────────────────────────────────────────────
+#
+# A preference sits between a goal and a hard constraint. A goal is a whole
+# nutritional profile ("heart health" also weighs saturated fat, total fat and
+# cholesterol); a preference is one nutrient the user asked us to watch. Without
+# these, the only way to say "I want low sodium" was to adopt a goal that drags
+# in four other thresholds.
+#
+# Thresholds follow front-of-pack traffic-light bands per 100g, which is the
+# basis the rest of the engine already works on.
+PREFERENCE_PROFILES = {
+    "low_sugar": {
+        "label": "Low sugar", "nutrient": "total_sugars_g",
+        "direction": "low", "good": 5.0, "bad": 22.5, "unit": "g",
+    },
+    "low_sodium": {
+        "label": "Low sodium", "nutrient": "sodium_mg",
+        "direction": "low", "good": 120.0, "bad": 600.0, "unit": "mg",
+    },
+    "low_fat": {
+        "label": "Low fat", "nutrient": "total_fat_g",
+        "direction": "low", "good": 3.0, "bad": 17.5, "unit": "g",
+    },
+    "low_saturated_fat": {
+        "label": "Low saturated fat", "nutrient": "saturated_fat_g",
+        "direction": "low", "good": 1.5, "bad": 5.0, "unit": "g",
+    },
+    "high_protein": {
+        "label": "High protein", "nutrient": "protein_g",
+        "direction": "high", "good": 15.0, "bad": 3.0, "unit": "g",
+    },
+    "high_fiber": {
+        "label": "High fibre", "nutrient": "fiber_g",
+        "direction": "high", "good": 6.0, "bad": 1.5, "unit": "g",
+    },
+}
+
+# Common phrasings for the canonical keys above.
+PREFERENCE_ALIASES = {
+    "low sugar": "low_sugar", "less sugar": "low_sugar", "sugar free": "low_sugar",
+    "low salt": "low_sodium", "low sodium": "low_sodium",
+    "low fat": "low_fat",
+    "low saturated fat": "low_saturated_fat", "low sat fat": "low_saturated_fat",
+    "high protein": "high_protein", "more protein": "high_protein",
+    "high fibre": "high_fiber", "high fiber": "high_fiber",
+}
+
+# How far a satisfied or violated preference can move the score. Deliberately
+# modest: a preference is a nudge, not a verdict, and several of them must not
+# be able to swamp the nutritional assessment underneath.
+_PREFERENCE_BONUS = 6      # fully satisfied
+_PREFERENCE_PENALTY = -8   # fully violated — asymmetric, because failing what
+                           # the user explicitly asked for matters more than
+                           # meeting it
+_PREFERENCE_TOTAL_CAP = 15
+
+# A preference the user marked strict is a hard constraint, but a self-imposed
+# one — kept clearly above the allergen and dietary caps so the three remain
+# distinguishable by score alone.
+_STRICT_PREFERENCE_CAP = 25
+
+
+def _resolve_preference_key(preference_type: str) -> str:
+    """Resolve a stored preference onto a canonical PREFERENCE_PROFILES key."""
+    n = _normalize(preference_type).replace(" ", "_")
+    if n in PREFERENCE_PROFILES:
+        return n
+    return PREFERENCE_ALIASES.get(_normalize(preference_type), n)
+
+
 # Maps common goal phrasings onto the canonical GOAL_PROFILES keys so that
 # free-text goals like "muscle_building" or "weight management" still resolve
 # to a hardcoded profile instead of silently scoring neutral.
@@ -256,6 +343,76 @@ _CONFIRMED_CERTAINTY = {"confirmed", "declared", "high", "certain", "definite"}
 
 
 # ──────────────────────────────────────────────
+# Dietary Pattern Compatibility
+# ──────────────────────────────────────────────
+#
+# A dietary pattern is a HARD constraint, not a preference: a vegan product
+# containing gelatin is not "slightly less suitable", it does not qualify. This
+# is kept separate from the allergen check because it is a compatibility
+# question rather than a safety one, and the two are reported separately.
+
+_MEAT_TERMS = [
+    "beef", "pork", "chicken", "mutton", "lamb", "turkey", "duck", "veal",
+    "venison", "bacon", "ham", "sausage", "salami", "pepperoni", "prosciutto",
+    "chorizo", "poultry", "liver", "tripe", "goat meat", "meat extract",
+    "chicken fat", "bone broth", "keema",
+]
+
+# Definitely animal-derived, but not muscle meat — these rule a product out for
+# every vegetarian pattern, and are the ones most often missed on a label.
+_ANIMAL_DERIVED_TERMS = [
+    "gelatin", "gelatine", "lard", "tallow", "suet", "animal fat", "bone char",
+    "isinglass", "carmine", "cochineal", "e120", "shellac", "e904",
+    "cod liver oil", "e441", "animal rennet",
+]
+
+_BEE_TERMS = ["honey", "beeswax", "e901", "royal jelly", "propolis"]
+
+# Genuinely ambiguous: commonly plant-derived, sometimes not. These raise a
+# "check the label" flag and deliberately do NOT change the score — capping a
+# product because it might contain animal-derived glycerin would be a guess
+# presented as a finding.
+_UNCERTAIN_ORIGIN_TERMS = [
+    "mono and diglycerides", "monoglycerides", "diglycerides", "e471",
+    "glycerol", "glycerin", "glycerine", "e422", "collagen", "rennet",
+    "lipase", "pepsin", "stearic acid", "magnesium stearate", "e470",
+    "vitamin d3", "l cysteine", "e920",
+]
+
+# "meat" is qualifiable the same way the dairy words are — "coconut meat" is a
+# plant, and flagging it would rule out most coconut products for vegetarians.
+_QUALIFIABLE_MEAT = {"meat"}
+
+# What each pattern rules out. Keys are normalized DietaryPattern values.
+#
+# Note the vegetarian/eggetarian split follows Indian usage, which is what this
+# catalogue is built around (the ingredient tables carry ghee, paneer, maida,
+# vanaspati): "vegetarian" excludes eggs, and "eggetarian" is the pattern that
+# permits them. Western lacto-ovo vegetarians should select eggetarian.
+#
+# "keto" is deliberately absent: it is a macronutrient target, not an
+# ingredient-exclusion list, and belongs in goal alignment where carbohydrate
+# thresholds already live. Treating it here would rule out foods on the wrong
+# basis entirely.
+DIET_EXCLUSIONS = {
+    "vegan": ["meat", "fish", "shellfish", "dairy", "egg", "animal_derived", "bee"],
+    "vegetarian": ["meat", "fish", "shellfish", "egg", "animal_derived"],
+    "eggetarian": ["meat", "fish", "shellfish", "animal_derived"],
+    "pescatarian": ["meat", "animal_derived"],
+}
+
+_DIET_GROUP_LABELS = {
+    "meat": "meat",
+    "fish": "fish",
+    "shellfish": "shellfish",
+    "dairy": "dairy",
+    "egg": "egg",
+    "animal_derived": "animal-derived ingredients",
+    "bee": "bee products",
+}
+
+
+# ──────────────────────────────────────────────
 # Engine Functions
 # ──────────────────────────────────────────────
 
@@ -275,6 +432,37 @@ def _resolve_goal_key(goal_type: str) -> str:
     return GOAL_ALIASES.get(n, n)
 
 
+# Words that name a dairy product on their own but, when preceded by a plant
+# source, name something with no dairy in it at all. Without this, "butter"
+# matched "peanut butter", "cocoa butter" and "shea butter", and "milk" matched
+# every plant milk — each one hard-capping the score at 15 and telling a
+# milk-allergic user that almond milk contains milk.
+_QUALIFIABLE_DAIRY = {"butter", "milk", "cream", "cheese", "yoghurt", "yogurt"}
+
+_PLANT_QUALIFIERS = {
+    "peanut", "peanuts", "cocoa", "cacao", "shea", "almond", "almonds",
+    "coconut", "soy", "soya", "oat", "oats", "rice", "cashew", "cashews",
+    "hazelnut", "walnut", "sunflower", "sesame", "hemp", "pea", "macadamia",
+    "pistachio", "apple", "nut", "seed", "plant", "vegan", "vegetable",
+}
+
+
+def _dairy_term_hit(text_norm: str, term: str) -> bool:
+    """
+    Whether a qualifiable dairy word appears in its dairy sense.
+
+    An occurrence preceded by a plant source ("almond milk", "cocoa butter") is
+    not dairy and does not count. A bare or compound occurrence still does, so
+    "buttermilk", "milk solids" and "butter oil" are unaffected.
+    """
+    pattern = rf"(?:(\w+)[\s\-]+)?{re.escape(term)}(?:s|es)?\b"
+    for match in re.finditer(pattern, text_norm):
+        preceding = match.group(1)
+        if preceding is None or preceding not in _PLANT_QUALIFIERS:
+            return True
+    return False
+
+
 def _text_contains_allergen(text_norm: str, synonyms: set[str]) -> bool:
     """
     Check whether a normalized text mentions any of the allergen synonyms.
@@ -282,13 +470,17 @@ def _text_contains_allergen(text_norm: str, synonyms: set[str]) -> bool:
     Short tokens (< 5 chars, e.g. "egg", "soy", "cod") are matched on word
     boundaries only, so "egg" no longer matches "eggplant" and "cod" no longer
     matches "cocoa". Longer synonyms still use substring matching so compound
-    words like "buttermilk" (via "butter") are caught.
+    words like "buttermilk" (via "butter") are caught — except for the dairy
+    words above, which are checked for a plant qualifier first.
     """
     for syn in synonyms:
         syn = syn.strip()
         if not syn:
             continue
-        if len(syn) >= 5:
+        if syn in _QUALIFIABLE_DAIRY:
+            if _dairy_term_hit(text_norm, syn):
+                return True
+        elif len(syn) >= 5:
             if syn in text_norm:
                 return True
         else:
@@ -544,6 +736,132 @@ def _check_allergen_match(
     return flags, level, recognized
 
 
+def _diet_group_terms(group: str) -> set[str]:
+    """
+    The terms that identify one excluded group.
+
+    Dairy, egg, fish and shellfish reuse the allergen tables rather than
+    duplicating them — the same words identify the same foods, and a term added
+    for allergen coverage should improve diet matching for free.
+    """
+    if group == "dairy":
+        return {_normalize(v) for v in ALLERGEN_SYNONYMS["milk"]}
+    if group == "egg":
+        return {_normalize(v) for v in ALLERGEN_SYNONYMS["eggs"]}
+    if group in ("fish", "shellfish"):
+        return {_normalize(v) for v in ALLERGEN_CATEGORIES[group]}
+    if group == "meat":
+        return {_normalize(v) for v in _MEAT_TERMS}
+    if group == "animal_derived":
+        return {_normalize(v) for v in _ANIMAL_DERIVED_TERMS}
+    if group == "bee":
+        return {_normalize(v) for v in _BEE_TERMS}
+    return set()
+
+
+def _meat_term_hit(text_norm: str, term: str) -> bool:
+    """"coconut meat" is a plant; a bare or compound "meat" is not."""
+    return _dairy_term_hit(text_norm, term)
+
+
+def _check_diet_compatibility(
+    dietary_pattern: Optional[str],
+    product_ingredients: list[dict],
+    product_allergens: list[dict],
+) -> tuple[list[SuitabilityFlag], str, list[str]]:
+    """
+    Check a product against the user's dietary pattern.
+
+    Returns (flags, level, uncertain_terms) where level is one of:
+        "none"          — nothing incompatible found
+        "uncertain"     — an ambiguous ingredient that MAY be animal-derived
+        "incompatible"  — an ingredient this pattern excludes
+
+    "uncertain" never changes the score. The ingredient is genuinely ambiguous,
+    and a guess that lowers a score reads as a finding.
+    """
+    flags: list[SuitabilityFlag] = []
+    pattern = _normalize(dietary_pattern or "")
+    excluded_groups = DIET_EXCLUSIONS.get(pattern)
+    if not excluded_groups:
+        # omnivore, keto, other, or nothing declared — no ingredient exclusions.
+        return flags, "none", []
+
+    ingredient_names = [
+        _normalize(str(i.get("name", ""))) for i in product_ingredients
+        if str(i.get("name", "")).strip()
+    ]
+    # Declared allergens carry the same information for dairy/egg/fish and are
+    # often present when the ingredient list is not.
+    declared = [
+        _normalize(str(a.get("allergen", ""))) for a in product_allergens
+        if str(a.get("allergen", "")).strip()
+    ]
+    haystack = ingredient_names + declared
+
+    found: dict[str, str] = {}   # group -> the ingredient that matched
+    for group in excluded_groups:
+        terms = _diet_group_terms(group)
+        for text in haystack:
+            for term in terms:
+                if term in _QUALIFIABLE_DAIRY:
+                    hit = _dairy_term_hit(text, term)
+                elif term in _QUALIFIABLE_MEAT:
+                    hit = _meat_term_hit(text, term)
+                elif len(term) >= 5:
+                    hit = term in text
+                else:
+                    hit = bool(re.search(rf"\b{re.escape(term)}(?:s|es)?\b", text))
+                if hit:
+                    found.setdefault(group, text)
+                    break
+            if group in found:
+                break
+
+    pattern_label = pattern.capitalize()
+
+    if found:
+        groups = ", ".join(_DIET_GROUP_LABELS.get(g, g) for g in found)
+        examples = ", ".join(sorted({v for v in found.values()})[:3])
+        flags.append(SuitabilityFlag(
+            flag_type="danger",
+            category="diet",
+            title=f"Not {pattern_label}",
+            description=(
+                f"This product contains {groups}, which your {pattern_label} "
+                f"dietary pattern excludes. Identified from: {examples}."
+            ),
+            impact=-50,
+        ))
+        return flags, "incompatible", []
+
+    # Only worth raising when nothing definitive was found — an ambiguous
+    # ingredient adds nothing once the product is already ruled out.
+    uncertain = []
+    for text in haystack:
+        for term in _UNCERTAIN_ORIGIN_TERMS:
+            if term in text:
+                uncertain.append(text)
+                break
+
+    if uncertain:
+        names = ", ".join(sorted(set(uncertain))[:3])
+        flags.append(SuitabilityFlag(
+            flag_type="warning",
+            category="diet",
+            title="May not be " + pattern_label,
+            description=(
+                f"Contains {names}, which can be either plant- or animal-derived. "
+                "The label doesn't say which, so check the packaging or the "
+                "manufacturer if this matters to you."
+            ),
+            impact=0,
+        ))
+        return flags, "uncertain", sorted(set(uncertain))
+
+    return flags, "none", []
+
+
 def _evaluate_goal_alignment(
     goal_type: str,
     nutrition: Optional[dict],
@@ -703,6 +1021,98 @@ def _fmt(value) -> str:
     except (TypeError, ValueError):
         return str(value)
     return str(int(rounded)) if rounded == int(rounded) else str(rounded)
+
+
+def _evaluate_preferences(
+    user_preferences: list[dict],
+    nutrition: Optional[dict],
+) -> tuple[list[SuitabilityFlag], int, str]:
+    """
+    Score the product against the nutrients the user asked us to watch.
+
+    Returns (flags, adjustment, level) where `adjustment` is the net points to
+    apply and `level` is:
+        "none"   — no preference applied, or all satisfied
+        "soft"   — at least one preference not met; the score is nudged down
+        "strict" — a preference marked as a hard constraint was violated
+
+    A preference is a nudge, never a block, unless the user marked it strict.
+    Preferences we cannot measure — the nutrient is absent from the label — are
+    skipped silently rather than counted as met, which would reward missing data.
+    """
+    flags: list[SuitabilityFlag] = []
+    if not user_preferences or not nutrition:
+        return flags, 0, "none"
+
+    total = 0
+    level = "none"
+    seen: set[str] = set()
+
+    for pref in user_preferences:
+        key = _resolve_preference_key(str(pref.get("preference_type", "")))
+        profile = PREFERENCE_PROFILES.get(key)
+        if not profile or key in seen:
+            continue
+        seen.add(key)
+
+        value = nutrition.get(profile["nutrient"])
+        if value is None:
+            continue
+
+        good, bad = profile["good"], profile["bad"]
+        if profile["direction"] == "low":
+            if value <= good:
+                ratio = 1.0
+            elif value >= bad:
+                ratio = 0.0
+            else:
+                ratio = 1.0 - (value - good) / (bad - good)
+        else:
+            if value >= good:
+                ratio = 1.0
+            elif value <= bad:
+                ratio = 0.0
+            else:
+                ratio = (value - bad) / (good - bad)
+
+        # ratio 1.0 -> full bonus, 0.0 -> full penalty, linear between.
+        impact = int(round(_PREFERENCE_PENALTY + ratio * (_PREFERENCE_BONUS - _PREFERENCE_PENALTY)))
+        total += impact
+
+        is_strict = bool(pref.get("is_hard_constraint"))
+        shown = _fmt(value) + profile["unit"]
+        label = profile["label"]
+
+        if ratio >= 0.75:
+            flags.append(SuitabilityFlag(
+                flag_type="positive", category="preference",
+                title=f"Meets your {label.lower()} preference",
+                description=f"{profile['nutrient'].replace('_', ' ').title()}: {shown} per 100g.",
+                impact=impact,
+            ))
+        elif ratio <= 0.25 and is_strict:
+            level = "strict"
+            flags.append(SuitabilityFlag(
+                flag_type="danger", category="preference",
+                title=f"Fails your strict {label.lower()} requirement",
+                description=(
+                    f"{profile['nutrient'].replace('_', ' ').title()}: {shown} per 100g. "
+                    "You marked this preference as strict, so this product does not qualify."
+                ),
+                impact=impact,
+            ))
+        else:
+            if level != "strict":
+                level = "soft"
+            flags.append(SuitabilityFlag(
+                flag_type="warning", category="preference",
+                title=f"Against your {label.lower()} preference",
+                description=f"{profile['nutrient'].replace('_', ' ').title()}: {shown} per 100g.",
+                impact=impact,
+            ))
+
+    total = max(-_PREFERENCE_TOTAL_CAP, min(_PREFERENCE_TOTAL_CAP, total))
+    return flags, total, level
 
 
 def _calculate_nutritional_quality(nutrition: Optional[dict]) -> tuple[int, list[SuitabilityFlag]]:
@@ -948,6 +1358,7 @@ def calculate_suitability(
     user_preferences: list[dict],
     custom_profiles: dict = None,
     inferred_allergen_matches: dict = None,
+    dietary_pattern: Optional[str] = None,
 ) -> SuitabilityResult:
     """
     Main entry point: Calculate the Personal Suitability Score.
@@ -1031,6 +1442,16 @@ def calculate_suitability(
     # product unsafe. A soft preference does not affect safety.
     allergen_safe = conflict_level in ("none", "preference")
 
+    # ── Step 1b: Dietary pattern (hard constraint) ──
+    # A pattern the user declared rules a product out on composition, the same
+    # way an allergen does, and is reported as its own finding rather than
+    # folded into the score's explanation.
+    diet_flags, diet_level, _diet_uncertain = _check_diet_compatibility(
+        dietary_pattern, product_ingredients, product_allergens
+    )
+    all_flags.extend(diet_flags)
+    diet_compatible = diet_level != "incompatible"
+
     # ── Step 2: Goal Alignment (Soft Constraints) ──
     goal_alignments: list[GoalAlignment] = []
     goal_weights: list[float] = []
@@ -1088,6 +1509,12 @@ def calculate_suitability(
     ingredient_score, ingredient_flags = _calculate_ingredient_profile(product_ingredients)
     all_flags.extend(ingredient_flags)
 
+    # ── Step 5: Nutrient preferences (soft constraints) ──
+    preference_flags, preference_adjustment, preference_level = _evaluate_preferences(
+        user_preferences, product_nutrition
+    )
+    all_flags.extend(preference_flags)
+
     # ── Composite Score ──
     # Goal alignment is the strongest signal (50%), nutritional quality supports
     # it (30%), ingredient profile is a minor modifier (20%).
@@ -1126,6 +1553,11 @@ def calculate_suitability(
             ingredient_score * 0.25
         )
 
+    # Preferences adjust the assessment before any cap, so a product ruled out
+    # by an allergen or dietary pattern stays ruled out regardless of how many
+    # preferences it happens to satisfy.
+    base_overall = max(0, min(100, base_overall + preference_adjustment))
+
     if conflict_level == "confirmed":
         # Hard cap. A "mild" severity is slightly less punishing than
         # moderate/severe/unspecified.
@@ -1140,6 +1572,19 @@ def calculate_suitability(
     else:
         overall = base_overall
 
+    # A dietary pattern is a hard constraint: the product does not qualify,
+    # however well it scores nutritionally. Applied after the allergen cap and
+    # taking whichever is lower, so a product that is both stays at the
+    # stricter number rather than being lifted by this one.
+    if not diet_compatible:
+        overall = min(overall, 15)
+
+    # A preference the user marked strict is a hard constraint too, but a
+    # self-imposed one — capped above the allergen and dietary ceilings so the
+    # three stay distinguishable.
+    if preference_level == "strict":
+        overall = min(overall, _STRICT_PREFERENCE_CAP)
+
     overall = max(0, min(100, overall))
 
     # ── Verdict ──
@@ -1147,10 +1592,18 @@ def calculate_suitability(
         v is not None for v in product_nutrition.values()
     )
 
+    # The allergen verdict leads when both apply — it is the safety one.
     if conflict_level == "confirmed":
         verdict = "Not suitable — contains an allergen from your profile"
     elif conflict_level == "trace":
         verdict = "Caution — may contain an allergen from your profile"
+    elif not diet_compatible:
+        verdict = (
+            f"Not {_normalize(dietary_pattern or '').capitalize()} — "
+            "excluded by your dietary pattern"
+        )
+    elif preference_level == "strict":
+        verdict = "Does not meet a preference you marked as strict"
     else:
         if not has_nutrition and conflict_level == "none":
             verdict = "Limited data — suitability could not be fully assessed"
@@ -1188,6 +1641,7 @@ def calculate_suitability(
         verdict=verdict,
         confidence=confidence,
         allergen_safe=allergen_safe,
+        diet_compatible=diet_compatible,
         flags=all_flags,
         goal_alignments=goal_alignments,
         nutritional_quality_score=nutritional_quality_score,
@@ -1199,6 +1653,12 @@ def calculate_suitability(
             "nutritional_quality": nutritional_quality_score,
             "ingredient_profile": ingredient_score,
             "allergen_conflict": conflict_level,
+            # "none" | "uncertain" | "incompatible"
+            "diet_conflict": diet_level,
+            # "none" | "soft" | "strict", and the net points preferences moved
+            # the score by (already included in overall_score).
+            "preference_conflict": preference_level,
+            "preference_adjustment": preference_adjustment,
             "unscored_goals": unscored_goals,
             "weights": applied_weights,
         }

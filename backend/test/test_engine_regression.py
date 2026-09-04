@@ -2,7 +2,7 @@ import sys
 sys.path.insert(0, '.')
 from app.personalization.engine import (
     calculate_suitability, _resolve_goal_key, _build_allergen_synonyms,
-    _text_contains_allergen, GOAL_PROFILES,
+    _text_contains_allergen, _resolve_preference_key, GOAL_PROFILES,
 )
 
 fails = []
@@ -208,6 +208,128 @@ _rep=_generate_fallback("X",_r.overall_score,_r.verdict,_r.allergen_safe,_fl,_ga
 check("no 'None/100' in fallback report", "None/100" in _rep.detailed_analysis, False)
 check("no raw 'Not_evaluated' in fallback report", "Not_evaluated" in _rep.detailed_analysis, False)
 check("unscored goal shown as not assessed", "not assessed" in _rep.detailed_analysis, True)
+
+print("\n=== plant-qualified dairy words are not dairy ===")
+# "butter" and "milk" are >=5 chars, so they matched as substrings: peanut
+# butter, cocoa butter and every plant milk were reported as containing milk,
+# hard-capping the score at 15 for a milk-allergic user.
+_milk, _ = _build_allergen_synonyms("milk")
+for _ing in ["peanut butter", "cocoa butter", "shea butter", "almond milk",
+             "coconut milk", "soy milk", "oat milk", "cashew cream", "vegan cheese"]:
+    check(f"milk allergy vs {_ing!r}", _text_contains_allergen(_ing, _milk), False)
+for _ing in ["butter", "buttermilk", "milk solids", "skimmed milk powder",
+             "butter oil", "cream", "milk chocolate", "condensed milk"]:
+    check(f"milk allergy vs {_ing!r}", _text_contains_allergen(_ing, _milk), True)
+
+print("\n=== dietary pattern is a hard constraint ===")
+def _diet(pattern, ingredients):
+    r = calculate_suitability(
+        NUT, [], [{"name": n, "position": i + 1} for i, n in enumerate(ingredients)],
+        [{"goal_type": "general health", "priority": 0}], [], [], {},
+        dietary_pattern=pattern)
+    return r
+
+# Ruled out on composition, however well it scores nutritionally.
+for _pattern, _ings, _compatible in [
+    ("vegan", ["oats", "whey protein"], False),
+    ("vegan", ["oats", "honey"], False),
+    ("vegan", ["oats", "gelatin"], False),
+    ("vegan", ["oats", "almond milk", "cocoa butter"], True),
+    ("vegetarian", ["oats", "whey protein"], True),      # dairy is fine
+    ("vegetarian", ["oats", "egg white"], False),
+    ("vegetarian", ["oats", "chicken fat"], False),
+    ("eggetarian", ["oats", "egg white"], True),         # eggs are the point
+    ("eggetarian", ["oats", "beef extract"], False),
+    ("pescatarian", ["oats", "salmon oil"], True),
+    ("pescatarian", ["oats", "bacon"], False),
+    ("omnivore", ["oats", "gelatin"], True),
+    ("keto", ["oats", "gelatin"], True),                 # macro target, not exclusion
+    (None, ["oats", "gelatin"], True),
+    ("vegan", ["oats", "coconut meat"], True),           # a plant
+]:
+    check(f"{_pattern} + {_ings[1]}", _diet(_pattern, _ings).diet_compatible, _compatible)
+
+check("incompatible product is hard-capped",
+      _diet("vegan", ["oats", "gelatin"]).overall_score <= 15, True)
+check("compatible product is not penalised",
+      _diet("vegan", ["oats", "almond milk"]).overall_score > 70, True)
+check("verdict names the pattern",
+      "Vegan" in _diet("vegan", ["oats", "gelatin"]).verdict, True)
+check("breakdown reports the conflict",
+      _diet("vegan", ["oats", "gelatin"]).breakdown["diet_conflict"], "incompatible")
+
+# An ambiguous ingredient warns without changing the number — a guess that
+# lowers a score reads as a finding.
+_amb = _diet("vegan", ["oats", "mono and diglycerides"])
+check("ambiguous origin -> uncertain", _amb.breakdown["diet_conflict"], "uncertain")
+check("ambiguous origin does not cap", _amb.diet_compatible, True)
+check("ambiguous origin scores the same as a clean product",
+      _amb.overall_score, _diet("vegan", ["oats"]).overall_score)
+
+# Allergen safety and diet compatibility stay separate signals.
+_both = calculate_suitability(
+    NUT, [], [{"name": "whey protein", "position": 1}],
+    [{"goal_type": "general health", "priority": 0}],
+    [{"allergen": "milk", "allergy_type": "allergy", "severity": "severe"}], [], {},
+    dietary_pattern="vegan")
+check("allergen conflict and diet conflict coexist",
+      (_both.allergen_safe, _both.diet_compatible), (False, False))
+check("allergen verdict leads when both apply", "allergen" in _both.verdict.lower(), True)
+
+print("\n=== nutrient preferences are soft, until marked strict ===")
+# A high-sugar, high-sodium, high-protein snack.
+_PN = {"energy_kcal": 400, "protein_g": 18, "total_sugars_g": 30, "sodium_mg": 700,
+       "saturated_fat_g": 2, "fiber_g": 1, "total_fat_g": 10}
+def _pref(prefs):
+    return calculate_suitability(
+        _PN, [], [{"name": "oats", "position": 1}],
+        [{"goal_type": "general health", "priority": 0}], [], prefs, {})
+
+_none = _pref([])
+_violated = _pref([{"preference_type": "low_sugar", "is_hard_constraint": False}])
+_met = _pref([{"preference_type": "high_protein", "is_hard_constraint": False}])
+check("a violated preference lowers the score", _violated.overall_score < _none.overall_score, True)
+check("a met preference raises it", _met.overall_score > _none.overall_score, True)
+check("a violated preference does NOT block", _violated.overall_score > 25, True)
+check("violated -> soft", _violated.breakdown["preference_conflict"], "soft")
+check("met -> none", _met.breakdown["preference_conflict"], "none")
+
+_strict = _pref([{"preference_type": "low_sugar", "is_hard_constraint": True}])
+check("strict + violated -> strict", _strict.breakdown["preference_conflict"], "strict")
+check("strict + violated is capped", _strict.overall_score <= 25, True)
+check("strict + met is not penalised",
+      _pref([{"preference_type": "high_protein", "is_hard_constraint": True}]).overall_score,
+      _met.overall_score)
+
+# Several preferences must not be able to swamp the assessment beneath them.
+_many = _pref([{"preference_type": k, "is_hard_constraint": False} for k in
+               ("low_sugar", "low_sodium", "low_fat", "low_saturated_fat", "high_fiber")])
+check("total preference swing is capped at 15",
+      abs(_many.breakdown["preference_adjustment"]) <= 15, True)
+
+# A duplicate would be counted twice; the engine de-duplicates defensively.
+_dupe = _pref([{"preference_type": "low_sugar", "is_hard_constraint": False}] * 3)
+check("duplicate preferences count once",
+      _dupe.breakdown["preference_adjustment"], _violated.breakdown["preference_adjustment"])
+
+# An unmeasurable preference must not be scored as satisfied.
+_no_nutrient = calculate_suitability(
+    {"energy_kcal": 100}, [], [], [{"goal_type": "general health", "priority": 0}], [],
+    [{"preference_type": "low_sodium", "is_hard_constraint": False}], {})
+check("unmeasurable preference is skipped, not rewarded",
+      _no_nutrient.breakdown["preference_adjustment"], 0)
+
+check("aliases resolve", _resolve_preference_key("Low Salt"), "low_sodium")
+check("canonical keys pass through", _resolve_preference_key("high_protein"), "high_protein")
+
+# A hard constraint the user set on themselves must not outrank a safety one.
+_allergen_and_pref = calculate_suitability(
+    _PN, [{"allergen": "milk", "certainty": "declared"}], [{"name": "whey", "position": 1}],
+    [{"goal_type": "general health", "priority": 0}],
+    [{"allergen": "milk", "allergy_type": "allergy", "severity": "severe"}],
+    [{"preference_type": "low_sugar", "is_hard_constraint": True}], {})
+check("allergen cap still wins over a strict preference",
+      _allergen_and_pref.overall_score <= 15, True)
 
 print("\n=== gateway output coercion ===")
 from app.ai.gateway import _coerce_str_list
