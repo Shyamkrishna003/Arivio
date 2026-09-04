@@ -94,7 +94,7 @@ export default function ProductDetail() {
       try {
         const response = await productsAPI.getById(Number(id));
         setProduct(response.data);
-        
+
         // Record history if authenticated (we do it here after we know product exists,
         // but we actually need to wait for isAuthenticated to be true, so we can do it in another effect)
       } catch {
@@ -104,7 +104,16 @@ export default function ProductDetail() {
       }
     };
 
-    if (id) fetchProduct();
+    if (!id) return;
+    // A non-numeric id can only come from a bad link — requesting
+    // /products/NaN just returns a 422 we would report as a load failure.
+    if (!Number.isFinite(Number(id))) {
+      setError('That product link is not valid.');
+      setLoading(false);
+      setSuitabilityLoading(false);
+      return;
+    }
+    fetchProduct();
   }, [id]);
 
   // Record scan history
@@ -751,8 +760,11 @@ export default function ProductDetail() {
         <div className="product-section card animate-fade-in-up stagger-6">
           <div className="section-header">
             <h2><BarChart3 size={20} /> Nutrition</h2>
+            {/* Stated explicitly: these values are per 100g, not per serving,
+                and the score thresholds are calibrated on that basis. */}
+            <p className="text-sm text-muted mt-1">Per 100g</p>
           </div>
-          
+
           {product.nutrition ? (
             <div className="nutrition-grid">
               <div className="nutrition-item">

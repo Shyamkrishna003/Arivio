@@ -155,7 +155,7 @@ def _build_prompt(
 ## Product Data
 {product_info}
 
-**Nutrition (per serving):** {nutrition_text}
+**Nutrition (per 100g):** {nutrition_text}
 **Ingredients:** {ingredients_text}
 **Total ingredients count:** {len(ingredients)}
 
@@ -189,7 +189,9 @@ IMPORTANT RULES:
 - Use simple, non-medical language that anyone can understand
 - Do NOT make medical claims or diagnose conditions
 - Keep the tone helpful and empowering, not scary
-- Be specific: reference actual numbers from the nutrition data"""
+- Be specific: reference actual numbers from the nutrition data
+- Nutrition figures are per 100g, NOT per serving — say "per 100g" when you
+  quote a number, and never describe one as a serving amount"""
 
     return prompt
 
@@ -462,9 +464,17 @@ def _generate_fallback(
             # Surface every flag rather than the trimmed selection above.
             key_insights = [f"{f['title']}: {f['description']}" for f in flags] or key_insights
             for ga in goal_alignments:
-                recommendations.append(
-                    f"{ga['goal']}: scored {ga['score']}/100 ({ga['alignment']} alignment)."
-                )
+                # Same guard as the analysis section above: a goal with no
+                # profile has score None, and "scored None/100 (not_evaluated
+                # alignment)" is worse than saying it wasn't assessed.
+                if not ga.get("evaluated", True) or ga.get("score") is None:
+                    recommendations.append(
+                        f"{ga['goal']}: not assessed — no scoring profile exists for this goal."
+                    )
+                else:
+                    recommendations.append(
+                        f"{ga['goal']}: scored {ga['score']}/100 ({ga['alignment']} alignment)."
+                    )
 
         if types.count("inaccurate") >= 2:
             recommendations.append(

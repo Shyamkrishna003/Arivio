@@ -99,6 +99,23 @@ async def add_goal(
     normalized = _normalize(payload["goal_type"])
     payload["goal_type"] = normalized
 
+    # Reject a goal that resolves to the same scoring profile as one the user
+    # already has active — whether it's literally identical text or just an
+    # alias of it (e.g. "weight loss" and "weight management" both resolve to
+    # the "weight loss" profile). The composite score averages goals by
+    # weight, so two rows scored against the same profile would silently
+    # double that goal's influence instead of being rejected as a duplicate.
+    resolved_key = _resolve_goal_key(normalized)
+    existing_goals = await db.execute(
+        select(UserGoal).where(UserGoal.user_id == current_user.id, UserGoal.is_active == True)
+    )
+    for existing_goal in existing_goals.scalars().all():
+        if _resolve_goal_key(existing_goal.goal_type) == resolved_key:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"You already have an active goal for '{existing_goal.goal_type}'.",
+            )
+
     # Resolve the status up front where we can, so a goal we already support is
     # never shown as "pending" for the length of a pointless background task.
     if _resolve_goal_key(normalized) in GOAL_PROFILES:
@@ -165,6 +182,25 @@ async def add_allergy(
     db: AsyncSession = Depends(get_db),
 ):
     """Add an allergy/intolerance entry."""
+    from app.personalization.engine import _normalize
+
+    # Reject an exact repeat (same allergen text, same type) — the engine
+    # loops over every declared allergy and appends a flag per match, so a
+    # duplicate would just render the same warning/danger flag twice.
+    normalized_new = _normalize(data.allergen)
+    existing_allergies = await db.execute(
+        select(UserAllergy).where(UserAllergy.user_id == current_user.id)
+    )
+    for existing_allergy in existing_allergies.scalars().all():
+        if (
+            _normalize(existing_allergy.allergen) == normalized_new
+            and existing_allergy.allergy_type == data.allergy_type
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"You already have '{existing_allergy.allergen}' listed as a {data.allergy_type.value}.",
+            )
+
     allergy = UserAllergy(user_id=current_user.id, **data.model_dump())
     db.add(allergy)
     await db.flush()

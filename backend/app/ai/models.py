@@ -7,7 +7,7 @@ Covers: report_feedback — user ratings and comments on AI-generated reports.
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, DateTime, Text,
-    ForeignKey
+    ForeignKey, UniqueConstraint
 )
 from sqlalchemy.orm import relationship
 from app.db.session import Base
@@ -16,6 +16,10 @@ from app.db.session import Base
 class ReportFeedback(Base):
     """Stores user feedback on AI-generated product reports."""
     __tablename__ = "report_feedback"
+    # One rating per user per product: re-rating updates the existing row.
+    __table_args__ = (
+        UniqueConstraint("user_id", "product_id", name="uq_report_feedback_user_product"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)

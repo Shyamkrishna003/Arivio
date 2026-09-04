@@ -31,3 +31,6 @@ openai==1.46.0
 
 # OCR
 pytesseract==0.3.10
+
+# Email validation
+email-validator
