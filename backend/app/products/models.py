@@ -8,7 +8,7 @@ product_ingredients, nutrition_facts, product_allergens, saved_products
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, Float, Text,
-    ForeignKey, Enum as SAEnum, JSON, Index
+    ForeignKey, Enum as SAEnum, JSON, Index, UniqueConstraint
 )
 from sqlalchemy.orm import relationship
 from app.db.session import Base
@@ -82,6 +82,11 @@ class Product(Base):
 
 class ProductIdentifier(Base):
     __tablename__ = "product_identifiers"
+    # The barcode lookup keys on the value alone, so a repeated value would make
+    # it ambiguous and break every scan of that barcode.
+    __table_args__ = (
+        UniqueConstraint("identifier_value", name="uq_product_identifier_value"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False)
@@ -145,7 +150,10 @@ class NutritionFact(Base):
     serving_size = Column(String(100), nullable=True)
     serving_unit = Column(String(50), nullable=True)
 
-    # Per serving values
+    # Per 100g values. Open Food Facts is ingested from its *_100g fields and
+    # the scoring engine's thresholds are calibrated for that basis, so this is
+    # the unit everything downstream assumes. serving_size above is descriptive
+    # only — these numbers are not scaled to it.
     energy_kcal = Column(Float, nullable=True)
     total_fat_g = Column(Float, nullable=True)
     saturated_fat_g = Column(Float, nullable=True)

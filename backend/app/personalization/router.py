@@ -243,6 +243,81 @@ async def get_alternatives(
     prefs_result = await db.execute(select(UserPreference).where(UserPreference.user_id == current_user.id))
     user_preferences = [{"preference_type": p.preference_type, "is_hard_constraint": p.is_hard_constraint} for p in prefs_result.scalars().all()]
 
+    # ── Score the original product itself ──
+    # "Alternatives" only means something relative to what the user is already
+    # looking at — without this, a flat score threshold could surface a
+    # candidate that actually scores *worse* than the original product while
+    # the UI claims it "scored higher".
+    orig_nutrition_result = await db.execute(
+        select(NutritionFact).where(NutritionFact.product_id == product_id)
+    )
+    orig_nutrition_row = orig_nutrition_result.scalar_one_or_none()
+    original_nutrition = None
+    if orig_nutrition_row:
+        original_nutrition = {
+            "energy_kcal": orig_nutrition_row.energy_kcal,
+            "protein_g": orig_nutrition_row.protein_g,
+            "total_fat_g": orig_nutrition_row.total_fat_g,
+            "saturated_fat_g": orig_nutrition_row.saturated_fat_g,
+            "trans_fat_g": orig_nutrition_row.trans_fat_g,
+            "total_carbohydrates_g": orig_nutrition_row.total_carbohydrates_g,
+            "total_sugars_g": orig_nutrition_row.total_sugars_g,
+            "fiber_g": orig_nutrition_row.dietary_fiber_g,
+            "sodium_mg": orig_nutrition_row.sodium_mg,
+            "cholesterol_mg": orig_nutrition_row.cholesterol_mg,
+        }
+
+    orig_allergens_result = await db.execute(
+        select(ProductAllergen).where(ProductAllergen.product_id == product_id)
+    )
+    original_allergens = [
+        {"allergen": a.allergen, "certainty": a.certainty}
+        for a in orig_allergens_result.scalars().all()
+    ]
+
+    orig_ingredients_result = await db.execute(
+        select(ProductIngredient)
+        .where(ProductIngredient.product_id == product_id)
+        .order_by(ProductIngredient.position)
+    )
+    original_ingredients = [
+        {"name": i.name, "position": i.position, "percentage": i.percentage}
+        for i in orig_ingredients_result.scalars().all()
+    ]
+
+    try:
+        orig_unresolved = find_unresolved_allergens(
+            user_allergies, original_allergens, original_ingredients
+        )
+        orig_inferred = await resolve_allergens(
+            db=db,
+            product_id=product_id,
+            product_name=original_product.name,
+            unresolved=orig_unresolved,
+            product_ingredients=original_ingredients,
+            product_allergens=original_allergens,
+            allow_ai=False,
+        ) if orig_unresolved else {}
+    except Exception:
+        orig_inferred = {}
+
+    try:
+        original_suitability = calculate_suitability(
+            product_nutrition=original_nutrition,
+            product_allergens=original_allergens,
+            product_ingredients=original_ingredients,
+            user_goals=user_goals,
+            user_allergies=user_allergies,
+            user_preferences=user_preferences,
+            custom_profiles=custom_profiles,
+            inferred_allergen_matches=orig_inferred,
+        )
+        original_score = original_suitability.overall_score
+    except Exception:
+        # If we can't score the original product, fall back to the plain
+        # quality floor below rather than blocking alternatives entirely.
+        original_score = 0
+
     # ── Find candidates in same category ──
     candidates_result = await db.execute(
         select(Product)
@@ -340,8 +415,14 @@ async def get_alternatives(
         except Exception:
             continue
             
-        # Only suggest if it's safe and has a reasonably good score (e.g. > 70)
-        if suitability.allergen_safe and suitability.overall_score >= 70:
+        # Only suggest if it's safe, meets a reasonable quality floor, and
+        # actually scores higher than the product the user is looking at —
+        # matching the "these products scored higher" claim shown in the UI.
+        if (
+            suitability.allergen_safe
+            and suitability.overall_score >= 70
+            and suitability.overall_score > original_score
+        ):
             # Gather match reasons from goal alignments
             match_reasons = []
             for ga in suitability.goal_alignments:

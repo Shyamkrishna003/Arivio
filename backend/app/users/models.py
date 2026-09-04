@@ -8,7 +8,7 @@ user_allergies, user_health_context, privacy_settings
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, Float, Text,
-    ForeignKey, Enum as SAEnum, JSON
+    ForeignKey, Enum as SAEnum, JSON, Index, text
 )
 from sqlalchemy.orm import relationship
 from app.db.session import Base
@@ -111,6 +111,19 @@ class UserProfile(Base):
 
 class UserGoal(Base):
     __tablename__ = "user_goals"
+    # A duplicate goal is counted twice in the weighted goal average, so the
+    # same goal cannot be active twice for one user. Partial, so removing a
+    # goal does not block re-adding it later. The add_goal endpoint does more
+    # than this — it also rejects aliases of an existing goal ("weight loss"
+    # vs "weight management"), which the stored text alone cannot express.
+    __table_args__ = (
+        Index(
+            "uq_user_goal_active",
+            "user_id", "goal_type",
+            unique=True,
+            postgresql_where=text("is_active"),
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)

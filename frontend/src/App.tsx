@@ -1,8 +1,11 @@
+import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { Provider, useSelector } from 'react-redux';
+import { Provider, useSelector, useDispatch } from 'react-redux';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { store } from './store/index.ts';
 import type { RootState } from './store/index.ts';
+import { setUser } from './store/slices/authSlice';
+import { authAPI } from './services/api';
 import Navbar from './components/layout/Navbar';
 import Landing from './pages/landing/Landing';
 import Login from './pages/auth/Login';
@@ -10,6 +13,7 @@ import Register from './pages/auth/Register';
 import Dashboard from './pages/dashboard/Dashboard';
 import Scan from './pages/scan/Scan';
 import ProductSearch from './pages/product/ProductSearch';
+import ProductSubmit from './pages/product/ProductSubmit';
 import ProductDetail from './pages/product/ProductDetail';
 import Profile from './pages/profile/Profile';
 
@@ -22,6 +26,24 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+// `isAuthenticated` is restored from the stored token on boot, but the user
+// object is not — it only lives in memory. Without this, reloading any page
+// other than the dashboard (which fetches it itself) left the account details
+// blank even though the session was perfectly valid.
+function useHydrateUser() {
+  const { isAuthenticated, user } = useSelector((state: RootState) => state.auth);
+  const dispatch = useDispatch();
+
+  useEffect(() => {
+    if (!isAuthenticated || user) return;
+    authAPI.me()
+      .then((res) => dispatch(setUser(res.data)))
+      .catch(() => {
+        // A dead token is handled by the response interceptor; nothing to do.
+      });
+  }, [isAuthenticated, user, dispatch]);
+}
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useSelector((state: RootState) => state.auth);
@@ -40,6 +62,7 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
 }
 
 function AppRoutes() {
+  useHydrateUser();
   return (
     <BrowserRouter>
       <Navbar />
@@ -85,6 +108,17 @@ function AppRoutes() {
           element={
             <ProtectedRoute>
               <ProductSearch />
+            </ProtectedRoute>
+          }
+        />
+        {/* Declared before the :id route so "submit" is never read as an id.
+            Both the scanner (unknown barcode) and search (no results) link
+            here. */}
+        <Route
+          path="/products/submit"
+          element={
+            <ProtectedRoute>
+              <ProductSubmit />
             </ProtectedRoute>
           }
         />

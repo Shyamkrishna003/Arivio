@@ -240,14 +240,34 @@ async def submit_feedback(
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Product not found")
 
-    db_feedback = ReportFeedback(
-        user_id=current_user.id,
-        product_id=feedback.product_id,
-        rating=feedback.rating,
-        feedback_type=feedback.feedback_type,
-        comment=feedback.comment,
+    # One rating per user per product: re-rating updates the existing row.
+    # Inserting unconditionally piled up duplicates, which then broke the
+    # read side (it expects at most one row per product).
+    existing_result = await db.execute(
+        select(ReportFeedback)
+        .where(
+            ReportFeedback.user_id == current_user.id,
+            ReportFeedback.product_id == feedback.product_id,
+        )
+        .order_by(ReportFeedback.created_at.desc())
+        .limit(1)
     )
-    db.add(db_feedback)
+    db_feedback = existing_result.scalars().first()
+
+    if db_feedback:
+        db_feedback.rating = feedback.rating
+        db_feedback.feedback_type = feedback.feedback_type
+        db_feedback.comment = feedback.comment
+    else:
+        db_feedback = ReportFeedback(
+            user_id=current_user.id,
+            product_id=feedback.product_id,
+            rating=feedback.rating,
+            feedback_type=feedback.feedback_type,
+            comment=feedback.comment,
+        )
+        db.add(db_feedback)
+
     await db.commit()
     await db.refresh(db_feedback)
 
@@ -261,13 +281,19 @@ async def get_feedback(
     db: AsyncSession = Depends(get_db),
 ):
     """Get the current user's feedback for a specific product report."""
+    # Take the most recent row rather than asserting there is exactly one:
+    # historical data can hold more than one rating per product, and
+    # scalar_one_or_none() turns that into a 500 the caller can't recover from.
     result = await db.execute(
-        select(ReportFeedback).where(
+        select(ReportFeedback)
+        .where(
             ReportFeedback.user_id == current_user.id,
             ReportFeedback.product_id == product_id,
-        ).order_by(ReportFeedback.created_at.desc())
+        )
+        .order_by(ReportFeedback.created_at.desc())
+        .limit(1)
     )
-    feedback = result.scalar_one_or_none()
+    feedback = result.scalars().first()
     if not feedback:
         return {"feedback": None}
     return {
