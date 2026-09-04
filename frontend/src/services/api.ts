@@ -157,11 +157,16 @@ export const profileAPI = {
     api.post('/profile/allergies', data),
   removeAllergy: (id: number) => api.delete(`/profile/allergies/${id}`),
   knownAllergens: () => api.get<string[]>('/profile/allergens/known'),
+  // preference_type must be one of the canonical keys from getOptions().
   addPreference: (data: { preference_type: string; is_hard_constraint?: boolean }) =>
     api.post('/profile/preferences', data),
   removePreference: (id: number) => api.delete(`/profile/preferences/${id}`),
   getDashboard: () => api.get('/profile/dashboard'),
   recordHistory: (productId: number) => api.post(`/profile/history/${productId}`),
+  // Served by the API so the dropdowns cannot drift from what it validates.
+  getOptions: () => api.get('/profile/options'),
+  getPrivacy: () => api.get('/profile/privacy'),
+  updatePrivacy: (data: Record<string, boolean>) => api.put('/profile/privacy', data),
 };
 
 // Personalization API
@@ -184,4 +189,26 @@ export const aiAPI = {
   }) => api.post('/ai/feedback', data),
   getFeedback: (productId: number) =>
     api.get(`/ai/feedback/${productId}`),
+};
+
+// Community API
+export const communityAPI = {
+  // Works signed-out too — the aggregate is public, but the "people like you"
+  // split needs a profile to compare against.
+  getForProduct: (productId: number, limit = 20) =>
+    api.get(`/community/products/${productId}`, { params: { limit } }),
+  submitReview: (data: {
+    product_id: number;
+    usage_duration: string;
+    experience_type: string;
+    experience_text?: string;
+    rating?: number;
+    share_context?: boolean;
+  }) => api.post('/community/reviews', data),
+  vote: (reviewId: number, isHelpful: boolean) =>
+    api.post(`/community/reviews/${reviewId}/vote`, { is_helpful: isHelpful }),
+  flag: (reviewId: number, reason?: string) =>
+    api.post(`/community/reviews/${reviewId}/flag`, { reason }),
+  removeReview: (reviewId: number) =>
+    api.delete(`/community/reviews/${reviewId}`),
 };

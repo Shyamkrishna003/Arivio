@@ -6,8 +6,9 @@ import { productsAPI, personalizationAPI, aiAPI, profileAPI } from '../../servic
 import { 
   ArrowLeft, CheckCircle2, AlertTriangle, Shield, 
   Leaf, BarChart3, Target, XCircle, Info, TrendingUp, TrendingDown, Minus,
-  Brain, Star, Sparkles, MessageSquare, ChevronDown, ChevronUp, Lightbulb
+  Brain, Star, Sparkles, MessageSquare, ChevronDown, ChevronUp, Lightbulb, Ban
 } from 'lucide-react';
+import CommunitySection from '../../components/community/CommunitySection';
 import './ProductDetail.css';
 
 interface SuitabilityData {
@@ -15,6 +16,8 @@ interface SuitabilityData {
   verdict: string;
   confidence: number;
   allergen_safe: boolean;
+  // False when the product contains something the user's dietary pattern excludes.
+  diet_compatible?: boolean;
   flags: Array<{
     flag_type: string;
     category: string;
@@ -39,6 +42,9 @@ interface SuitabilityData {
     nutritional_quality: number;
     ingredient_profile: number;
     allergen_conflict?: 'none' | 'preference' | 'trace' | 'confirmed';
+    diet_conflict?: 'none' | 'uncertain' | 'incompatible';
+    preference_conflict?: 'none' | 'soft' | 'strict';
+    preference_adjustment?: number;
     unscored_goals?: string[];
     weights?: Record<string, number>;
   };
@@ -407,6 +413,18 @@ export default function ProductDetail() {
                 {!suitability.allergen_safe && (
                   <div className="allergen-warning-banner">
                     <XCircle size={16} /> Allergen conflict detected
+                  </div>
+                )}
+                {/* A compatibility issue is shown as its own banner rather than
+                    left to be inferred from the number. */}
+                {suitability.diet_compatible === false && (
+                  <div className="allergen-warning-banner diet-warning-banner">
+                    <Ban size={16} /> Excluded by your dietary pattern
+                  </div>
+                )}
+                {suitability.breakdown?.diet_conflict === 'uncertain' && (
+                  <div className="diet-uncertain-banner">
+                    <Info size={14} /> Contains an ingredient that may be animal-derived
                   </div>
                 )}
               </div>
@@ -828,6 +846,12 @@ export default function ProductDetail() {
         </div>
 
       </div>
+
+      {/* Real-world experiences, kept separate from the analysis above: the
+          score is derived from the label, this is what people reported. */}
+      {product && (
+        <CommunitySection productId={product.id} isAuthenticated={isAuthenticated} />
+      )}
     </div>
   );
 }

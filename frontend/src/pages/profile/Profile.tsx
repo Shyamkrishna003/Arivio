@@ -2,8 +2,10 @@ import { useState, useEffect } from 'react';
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store';
 import { profileAPI } from '../../services/api';
-import { Shield, Target, AlertTriangle, CheckCircle2, HeartPulse, Loader2 } from 'lucide-react';
+import { Shield, Target, AlertTriangle, CheckCircle2, HeartPulse, Loader2, Lock, UserCircle } from 'lucide-react';
 import './Profile.css';
+
+interface Opt { value: string; label: string }
 
 export default function Profile() {
   const { user } = useSelector((state: RootState) => state.auth);
@@ -21,6 +23,11 @@ export default function Profile() {
   // surfaced so "Add" doesn't silently do nothing.
   const [goalError, setGoalError] = useState('');
   const [allergyError, setAllergyError] = useState('');
+  const [privacy, setPrivacy] = useState<Record<string, boolean> | null>(null);
+  const [options, setOptions] = useState<{
+    age_ranges: Opt[]; activity_levels: Opt[]; dietary_patterns: Opt[]; preferences: Opt[];
+  } | null>(null);
+  const [detailsSaved, setDetailsSaved] = useState('');
 
   useEffect(() => {
     fetchProfile();
@@ -29,7 +36,65 @@ export default function Profile() {
     profileAPI.knownAllergens()
       .then((r) => setKnownAllergens(r.data))
       .catch(() => setKnownAllergens([]));
+    profileAPI.getPrivacy()
+      .then((r) => setPrivacy(r.data))
+      .catch(() => setPrivacy(null));
+    profileAPI.getOptions()
+      .then((r) => setOptions(r.data))
+      .catch(() => setOptions(null));
   }, []);
+
+  // Saves per field. These feed both the suitability score and community
+  // relevance, so a half-filled form abandoned at a Save button is worse than
+  // banking each answer as it is given.
+  const saveDetail = async (patch: Record<string, string>) => {
+    setProfile((p: any) => ({ ...p, profile: { ...(p?.profile || {}), ...patch } }));
+    try {
+      await profileAPI.update(patch);
+      setDetailsSaved('Saved');
+      setTimeout(() => setDetailsSaved(''), 1800);
+    } catch {
+      fetchProfile();   // reload rather than leave a value the server rejected
+    }
+  };
+
+  const togglePreference = async (key: string, on: boolean, existing: any) => {
+    try {
+      if (on) {
+        await profileAPI.addPreference({ preference_type: key, is_hard_constraint: false });
+      } else if (existing) {
+        await profileAPI.removePreference(existing.id);
+      }
+      fetchProfile();
+    } catch {
+      fetchProfile();
+    }
+  };
+
+  // Re-posting the same preference updates its strictness rather than adding
+  // a second row, so this needs no separate endpoint.
+  const setStrict = async (key: string, strict: boolean) => {
+    try {
+      await profileAPI.addPreference({ preference_type: key, is_hard_constraint: strict });
+      fetchProfile();
+    } catch {
+      fetchProfile();
+    }
+  };
+
+  // Each toggle saves on its own — a settings panel with a separate Save
+  // button silently loses changes when the user navigates away.
+  const savePrivacy = async (patch: Record<string, boolean>) => {
+    const optimistic = { ...(privacy || {}), ...patch };
+    setPrivacy(optimistic);
+    try {
+      const res = await profileAPI.updatePrivacy(patch);
+      setPrivacy(res.data);
+    } catch {
+      // Put the switch back rather than showing a state the server rejected.
+      setPrivacy(privacy);
+    }
+  };
 
   // A newly added goal is validated in the background (the API answers before
   // the AI has judged it), so poll while anything is still pending.
@@ -270,12 +335,130 @@ export default function Profile() {
           </div>
         </div>
         
-        {/* Dietary Preferences */}
+        {/* About You — the attributes that drive community relevance */}
+        <div className="profile-section card animate-fade-in-up stagger-3">
+          <div className="section-header">
+            <h2><UserCircle size={20} /> About You</h2>
+            {detailsSaved && <span className="detail-saved"><CheckCircle2 size={13} /> {detailsSaved}</span>}
+          </div>
+          <p className="privacy-intro">
+            Optional, and private by default. These are what let us match you to people
+            with a comparable profile — without them, community experiences can only be
+            compared on your goals and allergies.
+          </p>
+
+          <div className="detail-fields">
+            {([
+              ['age_range', 'Age range', options?.age_ranges],
+              ['dietary_pattern', 'Dietary pattern', options?.dietary_patterns],
+              ['activity_level', 'Activity level', options?.activity_levels],
+            ] as const).map(([key, label, opts]) => (
+              <div key={key} className="detail-field">
+                <label htmlFor={`fld-${key}`}>{label}</label>
+                <select
+                  id={`fld-${key}`}
+                  className="input"
+                  value={profile?.profile?.[key] || ''}
+                  disabled={!opts}
+                  onChange={(e) => saveDetail({ [key]: e.target.value })}
+                >
+                  <option value="">Not specified</option>
+                  {(opts || []).map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Anonymous context sharing — consent for community matching */}
         <div className="profile-section card animate-fade-in-up stagger-4">
+          <div className="section-header">
+            <h2><Lock size={20} /> Community Privacy</h2>
+          </div>
+          <p className="privacy-intro">
+            Your profile is private. You can optionally let selected attributes be shared
+            <strong> anonymously </strong> with experiences you post, so the platform can
+            show your review to people with a comparable profile — and show you theirs.
+            Your identity is never attached, and health details are never shared.
+          </p>
+
+          <label className="privacy-master">
+            <input
+              type="checkbox"
+              checked={!!privacy?.allow_anonymous_context_sharing}
+              onChange={(e) => savePrivacy({ allow_anonymous_context_sharing: e.target.checked })}
+            />
+            <span>Allow anonymous context sharing</span>
+          </label>
+
+          {/* Nothing below the master switch applies while it is off, so the
+              controls are disabled rather than implying they still do. */}
+          <div className={`privacy-options ${privacy?.allow_anonymous_context_sharing ? '' : 'disabled'}`}>
+            {([
+              ['share_age_range', 'Age range'],
+              ['share_dietary_pattern', 'Dietary pattern'],
+              ['share_activity_level', 'Activity level'],
+              ['share_goals', 'Health goals'],
+              ['share_allergies', 'Allergies'],
+            ] as const).map(([key, label]) => (
+              <label key={key} className="privacy-option">
+                <input
+                  type="checkbox"
+                  disabled={!privacy?.allow_anonymous_context_sharing}
+                  checked={!!privacy?.[key]}
+                  onChange={(e) => savePrivacy({ [key]: e.target.checked })}
+                />
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {/* Nutrient preferences — soft constraints */}
+        <div className="profile-section card animate-fade-in-up stagger-5">
           <div className="section-header">
             <h2><HeartPulse size={20} /> Dietary Preferences</h2>
           </div>
-          <p className="empty-text">Dietary preferences configuration coming soon.</p>
+          <p className="privacy-intro">
+            Individual nutrients to watch. These <strong>nudge</strong> a product's score
+            rather than ruling it out — unlike an allergy or a dietary pattern. Mark one
+            <strong> strict</strong> to make it a hard requirement instead.
+          </p>
+
+          <div className="pref-list">
+            {(options?.preferences || []).map((opt) => {
+              const active = (profile?.preferences || []).find(
+                (p: any) => p.preference_type === opt.value);
+              return (
+                <div key={opt.value} className={`pref-row ${active ? 'active' : ''}`}>
+                  <label className="pref-main">
+                    <input
+                      type="checkbox"
+                      checked={!!active}
+                      onChange={(e) => togglePreference(opt.value, e.target.checked, active)}
+                    />
+                    <span>{opt.label}</span>
+                  </label>
+                  {/* Only meaningful once the preference is on. */}
+                  {active && (
+                    <label className="pref-strict">
+                      <input
+                        type="checkbox"
+                        checked={!!active.is_hard_constraint}
+                        onChange={(e) => setStrict(opt.value, e.target.checked)}
+                      />
+                      <span>Strict</span>
+                    </label>
+                  )}
+                </div>
+              );
+            })}
+            {!options?.preferences?.length && (
+              <p className="empty-text">Preferences unavailable right now.</p>
+            )}
+          </div>
         </div>
       </div>
     </div>

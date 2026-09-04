@@ -14,6 +14,7 @@ from app.users.router import router as users_router
 from app.products.router import router as products_router
 from app.personalization.router import router as personalization_router
 from app.ai.router import router as ai_router
+from app.community.router import router as community_router
 
 # Import all models to ensure SQLAlchemy mapper registry is fully populated
 import app.community.models
@@ -60,6 +61,7 @@ app.include_router(users_router, prefix=settings.API_PREFIX)
 app.include_router(products_router, prefix=settings.API_PREFIX)
 app.include_router(personalization_router, prefix=settings.API_PREFIX)
 app.include_router(ai_router, prefix=settings.API_PREFIX)
+app.include_router(community_router, prefix=settings.API_PREFIX)
 
 
 @app.get("/")

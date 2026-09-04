@@ -9,12 +9,16 @@ from typing import List
 
 from app.db.session import get_db
 from app.core.security import get_current_user
-from app.users.models import User, UserProfile, UserGoal, UserAllergy, UserPreference, UserScanHistory
+from app.users.models import (
+    User, UserProfile, UserGoal, UserAllergy, UserPreference, UserScanHistory,
+    PrivacySetting,
+)
 from app.products.models import SavedProduct
 from app.users.schemas import (
     ProfileUpdate, ProfileResponse, GoalCreate, GoalResponse,
     AllergyCreate, AllergyResponse, PreferenceCreate, PreferenceResponse,
-    FullProfileResponse, DashboardResponse, RecentActivityItem
+    FullProfileResponse, DashboardResponse, RecentActivityItem,
+    PrivacyResponse, PrivacyUpdate,
 )
 from sqlalchemy import func
 from sqlalchemy.orm import joinedload
@@ -80,6 +84,33 @@ async def update_profile(
 
     await db.flush()
     return profile
+
+
+@router.get("/options")
+async def profile_options():
+    """
+    The values the profile fields accept.
+
+    Served rather than duplicated in the client so the dropdowns cannot drift
+    from what the API validates — and, in the case of age bands, from the
+    ordered scale community relevance compares them on.
+    """
+    from app.users.models import AGE_RANGES, ActivityLevel, DietaryPattern
+    from app.personalization.engine import PREFERENCE_PROFILES
+
+    def label(value: str) -> str:
+        return value.replace("_", " ").capitalize()
+
+    return {
+        "age_ranges": [{"value": v, "label": v.capitalize()} for v in AGE_RANGES],
+        "activity_levels": [{"value": e.value, "label": label(e.value)} for e in ActivityLevel],
+        "dietary_patterns": [{"value": e.value, "label": label(e.value)} for e in DietaryPattern],
+        "preferences": [
+            {"value": key, "label": profile["label"],
+             "nutrient": profile["nutrient"], "direction": profile["direction"]}
+            for key, profile in PREFERENCE_PROFILES.items()
+        ],
+    }
 
 
 @router.post("/goals", response_model=GoalResponse, status_code=status.HTTP_201_CREATED)
@@ -229,7 +260,21 @@ async def add_preference(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Add a dietary preference."""
+    """Add a nutrient preference."""
+    # One entry per nutrient: a repeat would be scored twice, doubling the
+    # nudge it applies. Re-adding updates the strictness instead.
+    existing = await db.execute(
+        select(UserPreference).where(
+            UserPreference.user_id == current_user.id,
+            UserPreference.preference_type == data.preference_type,
+        )
+    )
+    current = existing.scalar_one_or_none()
+    if current is not None:
+        current.is_hard_constraint = data.is_hard_constraint
+        await db.flush()
+        return current
+
     pref = UserPreference(user_id=current_user.id, **data.model_dump())
     db.add(pref)
     await db.flush()
@@ -252,6 +297,60 @@ async def remove_preference(
     if not pref:
         raise HTTPException(status_code=404, detail="Preference not found")
     await db.delete(pref)
+
+@router.get("/privacy", response_model=PrivacyResponse)
+async def get_privacy(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    What this account currently permits to be shared with a community review.
+
+    Everything is off unless explicitly enabled — sharing is opt-in, and the
+    row is created in that state at registration.
+    """
+    result = await db.execute(
+        select(PrivacySetting).where(PrivacySetting.user_id == current_user.id)
+    )
+    settings_row = result.scalar_one_or_none()
+    if not settings_row:
+        # An older account registered before privacy defaults existed. Create
+        # the row in its fully-private state rather than assuming consent.
+        settings_row = PrivacySetting(user_id=current_user.id)
+        db.add(settings_row)
+        await db.flush()
+    return settings_row
+
+
+@router.put("/privacy", response_model=PrivacyResponse)
+async def update_privacy(
+    data: PrivacyUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update anonymous context-sharing consent.
+
+    Consent is not retroactive in one direction only: withdrawing it stops
+    future sharing, and re-submitting an experience rebuilds its shared context
+    from the settings in force at that moment. Context already attached to past
+    reviews is removed when a review is resubmitted without consent — see
+    `create_review`.
+    """
+    result = await db.execute(
+        select(PrivacySetting).where(PrivacySetting.user_id == current_user.id)
+    )
+    settings_row = result.scalar_one_or_none()
+    if not settings_row:
+        settings_row = PrivacySetting(user_id=current_user.id)
+        db.add(settings_row)
+
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(settings_row, field, value)
+
+    await db.flush()
+    return settings_row
+
 
 @router.get("/dashboard", response_model=DashboardResponse)
 async def get_dashboard(
