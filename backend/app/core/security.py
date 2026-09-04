@@ -70,6 +70,17 @@ async def get_current_user(
     from app.users.models import User
 
     payload = decode_token(credentials.credentials)
+
+    # Only an access token authenticates a request. Both token types are signed
+    # with the same key, so without this a refresh token — which lives 7 days
+    # rather than 30 minutes — would be accepted anywhere an access token is.
+    if payload.get("type") != "access":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     user_id: str = payload.get("sub")
     if user_id is None:
         raise HTTPException(
@@ -77,7 +88,16 @@ async def get_current_user(
             detail="Could not validate credentials",
         )
 
-    result = await db.execute(select(User).where(User.id == int(user_id)))
+    try:
+        user_pk = int(user_id)
+    except (TypeError, ValueError):
+        # A non-numeric subject is a malformed token, not a server fault.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+        )
+
+    result = await db.execute(select(User).where(User.id == user_pk))
     user = result.scalar_one_or_none()
 
     if user is None:

@@ -216,5 +216,35 @@ check("None -> []", _coerce_str_list(None), [])
 check("list of dicts", _coerce_str_list([{"insight":"a"},{"insight":"b"}]), ["a","b"])
 check("nulls stripped", _coerce_str_list(["a",None,"","b"]), ["a","b"])
 
+print("\n=== fallback recommendations also guard the unscored goal ===")
+# The 'incomplete' feedback branch builds its own per-goal lines. It used to
+# skip the score=None guard the analysis section applies, emitting
+# "scored None/100 (not_evaluated alignment)".
+_incomplete = [{"rating": 2, "feedback_type": "incomplete", "comment": ""},
+               {"rating": 2, "feedback_type": "incomplete", "comment": ""}]
+_rep2 = _generate_fallback("X", _r.overall_score, _r.verdict, _r.allergen_safe,
+                           _fl, _gas, _incomplete)
+_recs = " | ".join(_rep2.recommendations)
+check("no 'None/100' in recommendations", "None/100" in _recs, False)
+check("unscored goal shown as not assessed", "not assessed" in _recs, True)
+
+print("\n=== nutrition figures are per 100g, and readable ===")
+from app.personalization.engine import _fmt, _calculate_nutritional_quality
+# Source values carry full float precision; a label figure must not read as
+# "55.4545454545455g".
+check("long float rounded", _fmt(55.4545454545455), "55.5")
+check("whole number stays whole", _fmt(12.0), "12")
+check("one decimal preserved", _fmt(0.5), "0.5")
+check("int passes through", _fmt(3), "3")
+_, _nflags = _calculate_nutritional_quality(
+    {'total_sugars_g': 55.4545454545455, 'saturated_fat_g': 17.2727272727273,
+     'sodium_mg': 123.456, 'protein_g': 20.0, 'fiber_g': 5.0})
+_ntext = " | ".join(f.description for f in _nflags)
+# Values are ingested from Open Food Facts' *_100g fields and the thresholds are
+# calibrated on that basis, so the copy must not call them servings.
+check("no 'per serving' claim", "per serving" in _ntext, False)
+check("states the per-100g basis", "per 100g" in _ntext, True)
+check("no runaway precision", "55.4545" in _ntext, False)
+
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILURES: {fails}"))
 sys.exit(1 if fails else 0)

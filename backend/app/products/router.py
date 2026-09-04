@@ -134,11 +134,19 @@ async def scan_barcode(
         if current_user is not None and background_tasks is not None:
             from app.allergens.tasks import prime_allergen_inference
             background_tasks.add_task(prime_allergen_inference, current_user.id, product_id)
+    # identifier_value has no unique constraint, and two routes can create a
+    # second row for the same barcode: a user submitting a product with a
+    # barcode we already hold, and two concurrent scans of an unknown barcode
+    # both importing it. Take the earliest match instead of asserting there is
+    # exactly one — scalar_one_or_none() would raise here and 500 every future
+    # scan of that barcode.
     result = await db.execute(
         select(ProductIdentifier)
         .where(ProductIdentifier.identifier_value == barcode)
+        .order_by(ProductIdentifier.id)
+        .limit(1)
     )
-    identifier = result.scalar_one_or_none()
+    identifier = result.scalars().first()
 
     if identifier:
         product_result = await db.execute(
@@ -216,6 +224,10 @@ async def scan_barcode(
             ingredient_names = [ing_data["name"] for ing_data in off_data.get("ingredients", [])]
             background_tasks.add_task(analyze_product_allergens_ai, product.id, ingredient_names)
 
+        # A freshly imported product needs the cache warmed just as much as one
+        # we already held — arguably more, since nothing has ever scored it.
+        _prime(product.id)
+
         return ProductResponse.model_validate(product)
 
     raise HTTPException(
@@ -227,10 +239,26 @@ async def scan_barcode(
 @router.post("/submit", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
 async def submit_product(
     data: ProductSubmit,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Submit a new product (user-contributed)."""
+    # A barcode already on file means this product exists — point the user at it
+    # rather than creating a second product that shadows the first on scan.
+    if data.barcode:
+        existing = await db.execute(
+            select(ProductIdentifier)
+            .where(ProductIdentifier.identifier_value == data.barcode)
+            .limit(1)
+        )
+        existing_identifier = existing.scalars().first()
+        if existing_identifier:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A product with this barcode already exists (id {existing_identifier.product_id}).",
+            )
+
     product = Product(
         name=data.name,
         brand=data.brand,
@@ -250,5 +278,36 @@ async def submit_product(
             identifier_value=data.barcode,
         )
         db.add(identifier)
+
+    # Persist the ingredient list. Labels are comma-separated and ordered by
+    # descending quantity, which is exactly what the scoring engine expects —
+    # without this the submitted product has no ingredients to score at all.
+    if data.ingredients_text:
+        seen: set[str] = set()
+        position = 0
+        for raw_name in data.ingredients_text.split(","):
+            name = raw_name.strip().strip(".").strip()
+            if not name or len(name) > 255:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            position += 1
+            db.add(ProductIngredient(
+                product_id=product.id,
+                name=name,
+                position=position,
+            ))
+
+        if position:
+            # Same hidden-allergen pass the barcode-import path runs, so a
+            # user-submitted product gets the same allergen coverage.
+            from app.products.tasks import analyze_product_allergens_ai
+            background_tasks.add_task(
+                analyze_product_allergens_ai,
+                product.id,
+                [n for n in (v.strip() for v in data.ingredients_text.split(",")) if n],
+            )
 
     return ProductResponse.model_validate(product)

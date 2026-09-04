@@ -689,6 +689,22 @@ def _evaluate_goal_alignment(
     )
 
 
+def _fmt(value) -> str:
+    """
+    Render a nutrient value for display.
+
+    Source data carries full float precision — a unit conversion turns a tidy
+    label figure into "55.4545454545455g", which reads as false precision on a
+    number that came off a packet. One decimal place is as much as any label
+    justifies, and a whole number stays whole.
+    """
+    try:
+        rounded = round(float(value), 1)
+    except (TypeError, ValueError):
+        return str(value)
+    return str(int(rounded)) if rounded == int(rounded) else str(rounded)
+
+
 def _calculate_nutritional_quality(nutrition: Optional[dict]) -> tuple[int, list[SuitabilityFlag]]:
     """
     Calculate an overall nutritional quality score (0-100) independent of user goals.
@@ -715,19 +731,19 @@ def _calculate_nutritional_quality(nutrition: Optional[dict]) -> tuple[int, list
         if sugar > 22.5:
             score -= 18
             flags.append(SuitabilityFlag("warning", "nutrition", "Very high sugar",
-                f"Contains {sugar}g of sugar per serving (high is >22.5g).", -18))
+                f"Contains {_fmt(sugar)}g of sugar per 100g (high is >22.5g).", -18))
         elif sugar > 15:
             score -= 10
             flags.append(SuitabilityFlag("warning", "nutrition", "High sugar",
-                f"Contains {sugar}g of sugar per serving.", -10))
+                f"Contains {_fmt(sugar)}g of sugar per 100g.", -10))
         elif sugar > 11.25:
             score -= 5
             flags.append(SuitabilityFlag("info", "nutrition", "Moderate sugar",
-                f"Contains {sugar}g of sugar per serving.", -5))
+                f"Contains {_fmt(sugar)}g of sugar per 100g.", -5))
         elif sugar <= 5:
             score += 12
             flags.append(SuitabilityFlag("positive", "nutrition", "Low sugar",
-                f"Only {sugar}g of sugar per serving.", 12))
+                f"Only {_fmt(sugar)}g of sugar per 100g.", 12))
         else:
             score += 5  # Acceptable sugar level
 
@@ -737,13 +753,13 @@ def _calculate_nutritional_quality(nutrition: Optional[dict]) -> tuple[int, list
         if sodium > 600:
             score -= 12
             flags.append(SuitabilityFlag("warning", "nutrition", "High sodium",
-                f"Contains {sodium}mg of sodium per serving (high is >600mg).", -12))
+                f"Contains {_fmt(sodium)}mg of sodium per 100g (high is >600mg).", -12))
         elif sodium > 400:
             score -= 5
         elif sodium <= 200:
             score += 10
             flags.append(SuitabilityFlag("positive", "nutrition", "Low sodium",
-                f"Only {sodium}mg of sodium per serving.", 10))
+                f"Only {_fmt(sodium)}mg of sodium per 100g.", 10))
         else:
             score += 3  # Acceptable sodium level
 
@@ -753,13 +769,13 @@ def _calculate_nutritional_quality(nutrition: Optional[dict]) -> tuple[int, list
         if sat_fat > 5:
             score -= 10
             flags.append(SuitabilityFlag("warning", "nutrition", "High saturated fat",
-                f"Contains {sat_fat}g of saturated fat per serving.", -10))
+                f"Contains {_fmt(sat_fat)}g of saturated fat per 100g.", -10))
         elif sat_fat > 3:
             score -= 3
         elif sat_fat <= 1.5:
             score += 10
             flags.append(SuitabilityFlag("positive", "nutrition", "Low saturated fat",
-                f"Only {sat_fat}g of saturated fat per serving.", 10))
+                f"Only {_fmt(sat_fat)}g of saturated fat per 100g.", 10))
         else:
             score += 3  # Acceptable level
 
@@ -769,11 +785,11 @@ def _calculate_nutritional_quality(nutrition: Optional[dict]) -> tuple[int, list
         if protein >= 15:
             score += 12
             flags.append(SuitabilityFlag("positive", "nutrition", "High protein content",
-                f"Contains {protein}g of protein per serving.", 12))
+                f"Contains {_fmt(protein)}g of protein per 100g.", 12))
         elif protein >= 8:
             score += 8
             flags.append(SuitabilityFlag("positive", "nutrition", "Good protein content",
-                f"Contains {protein}g of protein per serving.", 8))
+                f"Contains {_fmt(protein)}g of protein per 100g.", 8))
         elif protein >= 3:
             score += 3
 
@@ -783,11 +799,11 @@ def _calculate_nutritional_quality(nutrition: Optional[dict]) -> tuple[int, list
         if fiber >= 5:
             score += 12
             flags.append(SuitabilityFlag("positive", "nutrition", "Excellent fiber content",
-                f"Contains {fiber}g of fiber per serving.", 12))
+                f"Contains {_fmt(fiber)}g of fiber per 100g.", 12))
         elif fiber >= 3:
             score += 8
             flags.append(SuitabilityFlag("positive", "nutrition", "Good fiber content",
-                f"Contains {fiber}g of fiber per serving.", 8))
+                f"Contains {_fmt(fiber)}g of fiber per 100g.", 8))
         elif fiber >= 1:
             score += 3
 

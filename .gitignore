@@ -7,6 +7,8 @@ venv/
 .venv/
 .claude/
 scratchpad/
+*.yml
+Product Requirements Document.md
 
 # Environment
 .env

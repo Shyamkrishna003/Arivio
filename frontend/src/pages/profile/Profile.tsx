@@ -17,6 +17,10 @@ export default function Profile() {
   const [newAllergyType, setNewAllergyType] = useState('allergy');
   const [newAllergySeverity, setNewAllergySeverity] = useState('severe');
   const [knownAllergens, setKnownAllergens] = useState<string[]>([]);
+  // e.g. rejected as a duplicate of a goal/allergy the user already has —
+  // surfaced so "Add" doesn't silently do nothing.
+  const [goalError, setGoalError] = useState('');
+  const [allergyError, setAllergyError] = useState('');
 
   useEffect(() => {
     fetchProfile();
@@ -50,12 +54,14 @@ export default function Profile() {
   const handleAddGoal = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newGoal) return;
+    setGoalError('');
     try {
       await profileAPI.addGoal({ goal_type: newGoal });
       setNewGoal('');
       fetchProfile();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to add goal', error);
+      setGoalError(error?.response?.data?.detail || 'Failed to add goal.');
     }
   };
 
@@ -71,6 +77,7 @@ export default function Profile() {
   const handleAddAllergy = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newAllergy) return;
+    setAllergyError('');
     try {
       await profileAPI.addAllergy({
         allergen: newAllergy,
@@ -81,8 +88,9 @@ export default function Profile() {
       });
       setNewAllergy('');
       fetchProfile();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to add allergy', error);
+      setAllergyError(error?.response?.data?.detail || 'Failed to add allergy.');
     }
   };
 
@@ -157,6 +165,9 @@ export default function Profile() {
             />
             <button type="submit" className="btn btn-secondary">Add</button>
           </form>
+          {goalError && (
+            <div className="form-error"><AlertTriangle size={14} /> {goalError}</div>
+          )}
 
           <div className="tags-list goals-list">
             {profile?.goals?.map((goal: any) => (
@@ -230,6 +241,9 @@ export default function Profile() {
             )}
             <button type="submit" className="btn btn-secondary">Add</button>
           </form>
+          {allergyError && (
+            <div className="form-error"><AlertTriangle size={14} /> {allergyError}</div>
+          )}
           <p className="allergy-hint">
             <strong>Prefer to avoid</strong> lowers a product's score but still lets it be
             recommended. <strong>Allergy</strong> and <strong>Intolerance</strong> rule it out.

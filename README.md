@@ -23,19 +23,57 @@ The core of the system is a **personalization engine** that turns a product's la
 
 ### Prerequisites
 
-- Node.js 18+
-- Python 3.11+
-- Docker & Docker Compose
+- Docker & Docker Compose (Option A needs nothing else)
+- Node.js 18+ (Option B)
+- Python 3.11+ (Option B)
 
-### 1. Start Infrastructure
+### Option A — Everything in Docker
 
 ```bash
-docker-compose up -d
+cp backend/.env.example backend/.env   # add AI_API_KEY if you have one
+docker compose up --build
 ```
 
-This starts PostgreSQL (with pgvector) and Redis.
+| Service | URL |
+|---|---|
+| Frontend | http://localhost:5173 |
+| Backend | http://localhost:8000 |
+| API docs | http://localhost:8000/docs |
+| PostgreSQL | `localhost:5433` |
+| Redis | `localhost:6379` |
 
-### 2. Backend Setup
+Migrations run automatically on backend start. Both source trees are
+bind-mounted, so uvicorn `--reload` and Vite HMR pick up edits without a
+rebuild — rebuild only when `requirements.txt` or `package.json` changes:
+
+```bash
+docker compose up --build backend    # after a dependency change
+docker compose logs -f backend       # follow logs
+docker compose down -v               # stop and wipe volumes
+```
+
+Notes on the compose setup:
+
+- Inside the network, services resolve each other by name (`postgres:5432`,
+  `redis:6379`). `VITE_API_URL` instead points at `localhost:8000`, because it
+  is resolved by your **browser**, not by the frontend container.
+- `backend/.env` is loaded if present but the compose `environment` block wins,
+  so a local `DATABASE_URL` pointing at `localhost` cannot break the container.
+- The frontend serves plain HTTP in Docker (`VITE_HTTPS=false`). Vite's dev
+  server otherwise uses a self-signed certificate, and an HTTPS page cannot call
+  the HTTP backend without the browser blocking it as mixed content.
+- Ports 5173 and 8000 must be free — stop any local `npm run dev` / `uvicorn`
+  first.
+
+### Option B — Run services locally
+
+Start only the infrastructure:
+
+```bash
+docker compose up -d postgres redis
+```
+
+#### Backend
 
 ```bash
 cd backend
@@ -52,7 +90,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 API docs available at: http://localhost:8000/docs
 
-### 3. Frontend Setup
+#### Frontend
 
 ```bash
 cd frontend
@@ -62,7 +100,7 @@ npm run dev
 
 App available at: http://localhost:5173
 
-### 4. Configuration
+### Configuration
 
 `backend/.env` (git-ignored — never commit real keys):
 
@@ -199,6 +237,15 @@ score = int((1 - ratio) * 100)
 
 Multiple goals are averaged by `priority`, weighted `1.0 + max(0, priority) × 0.5`.
 
+**The same goal cannot be active twice.** Because goals are combined as a
+weighted average, a duplicate votes twice and quietly skews every score — adding
+`muscle gain`, `bulking` and `muscle building` alongside `diabetes management`
+moved a high-sugar bar from **57 → 65**. `POST /profile/goals` therefore returns
+`409` when a goal resolves to a profile the user already has active, comparing
+*after* alias resolution so `weight loss` and `weight management` are recognised
+as one goal. A partial unique index (`uq_user_goal_active`) backs this at the
+database level for exact repeats; removing a goal still lets you re-add it.
+
 #### The sanity gate
 
 Because goals are free text, users can enter things that are not scoreable
@@ -230,6 +277,13 @@ would have penalised.
 A goal-independent 0–100 index built from an additive baseline of 60, adjusted by
 sugar, sodium, saturated fat, protein and fibre thresholds. Each adjustment emits
 a flag carrying its own impact, so the number is fully explainable.
+
+> **All nutrition figures are per 100g, not per serving.** Open Food Facts is
+> ingested from its `*_100g` fields and every threshold in the engine is
+> calibrated on that basis. `products.serving_size` is descriptive only — the
+> stored numbers are never scaled to it. Flags say "per 100g" for this reason,
+> and values are rounded to one decimal place so a converted figure reads as
+> `55.5g` rather than `55.4545454545455g`.
 
 ### 4. Ingredient profile
 
@@ -317,7 +371,14 @@ sequenceDiagram
 (`get_optional_user`, which returns `None` instead of 401). For a signed-in user
 it queues a background task that warms the allergen inference cache, so the
 suitability request that follows is served from cache — measured **1.2s → 0.02s**.
-Anonymous scans are unaffected.
+Anonymous scans are unaffected. Priming runs both for a product already on file
+and for one just imported from Open Food Facts.
+
+**Unknown barcode.** A scan that matches nothing locally and nothing in Open Food
+Facts returns `404`, and the frontend routes to `/products/submit` with the
+barcode prefilled. The same page backs the "Submit this Product" action on an
+empty search. Ingredients entered there are parsed into ordered rows, so a
+submitted product is immediately scoreable rather than an empty shell.
 
 The frontend fetches suitability **before** the AI report, so inference is always
 cached by report time and the report costs exactly one model call.
@@ -362,6 +423,13 @@ materially; every cached verdict then recomputes.
 calls `resolve_allergens(..., allow_ai=False)` — **cache reads only**, never a
 model call per candidate.
 
+**An alternative must actually beat the product you are looking at.** The
+endpoint scores the original product with the same engine and then keeps only
+candidates that are allergen-safe, clear a quality floor of 70, **and** score
+strictly higher than the original. A flat threshold alone would let a product
+scoring 71 be offered as an upgrade on one scoring 84, contradicting the
+"these products scored higher" claim the UI makes.
+
 ### Feedback-conditioned reports
 
 `ReportFeedback` rows (rating 1–5, type, optional comment) are injected into the
@@ -381,7 +449,7 @@ arivio/
 ├── frontend/                   # React + TypeScript + Vite
 │   └── src/
 │       ├── components/         # Reusable UI components
-│       ├── pages/              # Profile, ProductDetail, Scan, Dashboard
+│       ├── pages/              # Profile, ProductDetail, ProductSubmit, Scan, Dashboard
 │       ├── services/api.ts     # Axios client + token-refresh interceptor
 │       ├── store/slices/       # Redux Toolkit slices
 │       └── index.css           # Design system tokens
@@ -428,8 +496,8 @@ arivio/
 |--------|----------|-------------|
 | `GET` `PUT` | `/api/v1/profile` | Get / update profile |
 | `GET` | `/api/v1/profile/dashboard` | Dashboard summary |
-| `POST` `DELETE` | `/api/v1/profile/goals[/{id}]` | Manage goals |
-| `POST` `DELETE` | `/api/v1/profile/allergies[/{id}]` | Manage allergies |
+| `POST` `DELETE` | `/api/v1/profile/goals[/{id}]` | Manage goals — `409` if the goal (or an alias of it) is already active |
+| `POST` `DELETE` | `/api/v1/profile/allergies[/{id}]` | Manage allergies — `409` on an exact repeat of the same allergen and type |
 | `POST` `DELETE` | `/api/v1/profile/preferences[/{id}]` | Manage preferences |
 | `GET` | `/api/v1/profile/allergens/known` | Canonical allergen names (autocomplete) |
 | `POST` | `/api/v1/profile/history/{product_id}` | Record a scan |
@@ -441,7 +509,7 @@ arivio/
 | `GET` | `/api/v1/products/search` | Search products |
 | `GET` | `/api/v1/products/{product_id}` | Product details |
 | `POST` | `/api/v1/products/scan` | Barcode scan (auth optional) |
-| `POST` | `/api/v1/products/submit` | Submit a product |
+| `POST` | `/api/v1/products/submit` | Submit a product — parses `ingredients_text` into ordered rows; `409` if the barcode is already on file |
 
 ### Personalization & AI
 
@@ -513,6 +581,22 @@ Key tables beyond the obvious:
 `goal_type` is stored **normalized** (lowercased, `-`/`_` → space) on write, so it
 matches both hardcoded profile keys and generated rows.
 
+### Uniqueness guards
+
+Three reads assume at most one row. Each is enforced in the schema, because an
+application check alone cannot close a concurrent-request race:
+
+| Constraint | Table | Why |
+|---|---|---|
+| `uq_product_identifier_value` | `product_identifiers` | The barcode lookup keys on the value alone. A repeated value made it ambiguous and broke **every later scan of that barcode**. Two concurrent scans of an unknown barcode could each import it. |
+| `uq_report_feedback_user_product` | `report_feedback` | One rating per user per product; re-rating updates the existing row. |
+| `uq_user_goal_active` | `user_goals` | Partial (`WHERE is_active`) — a duplicate goal is double-counted in the weighted average. Partial so removing a goal does not block re-adding it. |
+
+The endpoints return a `409` before these fire, so the constraint is a backstop
+rather than the user-facing error. For goals the application check is also
+*stronger* than the index: it compares after alias resolution, which the stored
+text cannot express.
+
 ```bash
 alembic upgrade head          # apply
 alembic current               # show current revision
@@ -525,15 +609,16 @@ alembic history               # full chain
 
 ```bash
 cd backend
-./venv/bin/python test/test_engine_regression.py   # 74 assertions, no DB required
+./venv/bin/python test/test_engine_regression.py   # 77 assertions, no DB required
 ./venv/bin/python test/test_scoring.py             # scoring smoke test
 ```
 
 `test_engine_regression.py` is the safety net for the engine and covers goal
 alias resolution, allergen false positives (`egg` vs `eggplant`), category
 isolation (`cashew` vs `almond`), conflict tiers, order-independent severity,
-ingredient quality ordering, cache-key composition, and the rule that **AI can
-never clear a literal allergen match**.
+ingredient quality ordering, cache-key composition, the per-100g wording and
+rounding of nutrition flags, the rule that an unscored goal is never rendered as
+`None/100`, and the rule that **AI can never clear a literal allergen match**.
 
 Frontend type checking:
 
