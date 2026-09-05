@@ -57,6 +57,13 @@
   padding: var(--space-6);
 }
 
+/* Sections whose content does not fit a half-width column: the health section
+   holds a consent explainer, condition cards, a document list and a six-column
+   marker table, all of which were unusable squeezed into one grid cell. */
+.profile-section--wide {
+  grid-column: 1 / -1;
+}
+
 .account-details {
   display: flex;
   flex-direction: column;

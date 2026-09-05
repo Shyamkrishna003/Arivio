@@ -405,20 +405,36 @@ async def add_to_history(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Record that a user scanned or viewed a product, preventing duplicates."""
+    """
+    Record that a user scanned or viewed a product.
+
+    Written as a single upsert rather than read-then-write. The previous
+    version selected the row, then inserted if it was absent — and two
+    concurrent calls both saw it absent and both inserted, putting the product
+    in Recent Activity twice. That is not hypothetical: React StrictMode
+    double-invokes the effect that calls this, so it happened on essentially
+    every scan in development.
+
+    An application-level check cannot close that race whatever order it runs
+    in; only the database can, via the unique constraint this conflicts on.
+    """
     from datetime import datetime, timezone
 
-    result = await db.execute(
-        select(UserScanHistory)
-        .where(UserScanHistory.user_id == current_user.id, UserScanHistory.product_id == product_id)
-    )
-    existing = result.scalar_one_or_none()
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    if existing:
-        existing.scanned_at = datetime.now(timezone.utc)
-    else:
-        history = UserScanHistory(user_id=current_user.id, product_id=product_id)
-        db.add(history)
-        
+    stmt = (
+        pg_insert(UserScanHistory)
+        .values(
+            user_id=current_user.id,
+            product_id=product_id,
+            scanned_at=datetime.now(timezone.utc),
+        )
+        # Seeing a product again updates when, it does not add a second row.
+        .on_conflict_do_update(
+            constraint="uq_scan_history_user_product",
+            set_={"scanned_at": datetime.now(timezone.utc)},
+        )
+    )
+    await db.execute(stmt)
     await db.commit()
     return {"status": "success"}

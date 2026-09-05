@@ -8,7 +8,7 @@ product_ingredients, nutrition_facts, product_allergens, saved_products
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, Float, Text,
-    ForeignKey, Enum as SAEnum, JSON, Index, UniqueConstraint
+    ForeignKey, Enum as SAEnum, JSON, Index, UniqueConstraint, text
 )
 from sqlalchemy.orm import relationship
 from app.db.session import Base
@@ -75,8 +75,30 @@ class Product(Base):
     saved_by = relationship("SavedProduct", back_populates="product", cascade="all, delete-orphan")
     data_provenance = relationship("DataProvenance", back_populates="product", cascade="all, delete-orphan")
 
+    # Declared so autogenerate does not propose dropping what the trigram
+    # migration created. See a7c31f9d5b60 for why each one exists.
     __table_args__ = (
         Index("ix_products_brand_name", "brand", "name"),
+        Index(
+            "ix_products_search_trgm",
+            text("(coalesce(brand, '') || ' ' || name) gin_trgm_ops"),
+            postgresql_using="gin",
+        ),
+        Index(
+            "ix_products_name_trgm",
+            "name",
+            postgresql_using="gin",
+            postgresql_ops={"name": "gin_trgm_ops"},
+        ),
+        # An OFF product imported from a name search may carry no barcode, so
+        # product_identifiers cannot deduplicate it. Partial because both
+        # columns are null for user-submitted products.
+        Index(
+            "uq_products_external_ref",
+            "external_source", "external_id",
+            unique=True,
+            postgresql_where=text("external_source IS NOT NULL AND external_id IS NOT NULL"),
+        ),
     )
 
 

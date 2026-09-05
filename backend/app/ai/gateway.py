@@ -30,6 +30,19 @@ KNOWN_GROQ_MODELS = {
 }
 GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b"
 
+# Fallback model when AI_PROVIDER is Gemini but AI_MODEL names something else
+# (a Groq or OpenAI model, say). Defined here and imported by the other Gemini
+# call sites — it was previously written out at five of them, all still saying
+# "gemini-2.0-flash", which Google has since retired: every one of them now
+# answers 404 "no longer available". One constant so the next retirement is a
+# one-line fix instead of five.
+#
+# Google retires these on a schedule, so treat it as perishable. If Gemini
+# calls start failing with 404, list what the key can actually reach:
+#     curl -H "Authorization: Bearer $OCR_API_KEY" \
+#       https://generativelanguage.googleapis.com/v1beta/openai/models
+GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
+
 
 @dataclass
 class AIReport:
@@ -188,6 +201,13 @@ IMPORTANT RULES:
 - Relate everything back to the user's declared health goals
 - Use simple, non-medical language that anyone can understand
 - Do NOT make medical claims or diagnose conditions
+- Flags with category "health" came from lab results the user uploaded
+  themselves. You may say what the product does relative to those readings
+  ("this is high in sodium, and your recent results flagged kidney
+  function"), but you must NEVER name a disease, state or imply a diagnosis,
+  or tell them to start or stop a medication. Refer to "your recent results",
+  not to a condition. Suggest speaking to their doctor or a dietitian rather
+  than presenting your reading as clinical guidance.
 - Keep the tone helpful and empowering, not scary
 - Be specific: reference actual numbers from the nutrition data
 - Nutrition figures are per 100g, NOT per serving — say "per 100g" when you
@@ -244,120 +264,33 @@ def _parse_ai_response(raw: str) -> dict:
         raise ValueError("AI returned invalid JSON structure.")
 
 
-async def _generate_with_openai(prompt: str) -> AIReport:
-    """Generate report using OpenAI API."""
-    from openai import AsyncOpenAI
+SYSTEM_PROMPT = (
+    "You are ARIVIO, a personalized product intelligence AI. Always respond "
+    "with valid JSON only, no markdown code blocks."
+)
 
-    client = AsyncOpenAI(api_key=settings.AI_API_KEY)
-
-    response = await client.chat.completions.create(
-        model=settings.AI_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": "You are ARIVIO, a personalized product intelligence AI. Always respond with valid JSON only, no markdown code blocks."
-            },
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.4,
-        max_tokens=2000,
-        response_format={"type": "json_object"},
-    )
-
-    raw = response.choices[0].message.content or "{}"
-    data = _parse_ai_response(raw)
-
-    return AIReport(
-        summary=str(data.get("summary") or "Analysis complete."),
-        detailed_analysis=str(data.get("detailed_analysis") or ""),
-        key_insights=_coerce_str_list(data.get("key_insights")),
-        recommendations=_coerce_str_list(data.get("recommendations")),
-        confidence_note="This analysis is AI-generated based on available product data and your health profile. Always consult a healthcare professional for medical dietary advice.",
-        provider="openai",
-        model=settings.AI_MODEL,
-    )
+CONFIDENCE_NOTE = (
+    "This analysis is AI-generated based on available product data and your "
+    "health profile. Always consult a healthcare professional for medical "
+    "dietary advice."
+)
 
 
-async def _generate_with_gemini(prompt: str) -> AIReport:
-    """Generate report using Google Gemini API via OpenAI-compatible endpoint."""
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(
-        api_key=settings.AI_API_KEY,
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-    )
-
-    model = settings.AI_MODEL
-    if not model.startswith("gemini"):
-        model = "gemini-2.0-flash"
-
-    response = await client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": "You are ARIVIO, a personalized product intelligence AI. Always respond with valid JSON only, no markdown code blocks."
-            },
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.4,
-        max_tokens=3000,
-        response_format={"type": "json_object"},
-    )
-
-    raw = response.choices[0].message.content or "{}"
-    data = _parse_ai_response(raw)
-
-    return AIReport(
-        summary=str(data.get("summary") or "Analysis complete."),
-        detailed_analysis=str(data.get("detailed_analysis") or ""),
-        key_insights=_coerce_str_list(data.get("key_insights")),
-        recommendations=_coerce_str_list(data.get("recommendations")),
-        confidence_note="This analysis is AI-generated based on available product data and your health profile. Always consult a healthcare professional for medical dietary advice.",
-        provider="gemini",
-        model=model,
-    )
-
-
-async def _generate_with_groq(prompt: str) -> AIReport:
-    """Generate report using Groq API (extremely fast inference via LPU).
-    
-    Groq free tier: 30 RPM, 15K requests/day.
-    Supports Llama 3.3 70B, Llama 4 Scout, and other models.
+def _report_from_data(data: dict, provider: str, model: str) -> AIReport:
     """
-    from openai import AsyncOpenAI
+    Build a report from one provider's JSON.
 
-    client = AsyncOpenAI(
-        api_key=settings.AI_API_KEY,
-        base_url="https://api.groq.com/openai/v1"
-    )
-
-    model = settings.AI_MODEL if settings.AI_MODEL in KNOWN_GROQ_MODELS else GROQ_DEFAULT_MODEL
-
-    response = await client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": "You are ARIVIO, a personalized product intelligence AI. Always respond with valid JSON only, no markdown code blocks."
-            },
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.4,
-        max_tokens=2000,
-        response_format={"type": "json_object"},
-    )
-
-    raw = response.choices[0].message.content or "{}"
-    data = _parse_ai_response(raw)
-
+    Every field is coerced rather than trusted: models routinely return a bare
+    string, a list of dicts, or nulls where a list of strings was asked for,
+    and a malformed value flowing into the response schema 500s the endpoint.
+    """
     return AIReport(
         summary=str(data.get("summary") or "Analysis complete."),
         detailed_analysis=str(data.get("detailed_analysis") or ""),
         key_insights=_coerce_str_list(data.get("key_insights")),
         recommendations=_coerce_str_list(data.get("recommendations")),
-        confidence_note="This analysis is AI-generated based on available product data and your health profile. Always consult a healthcare professional for medical dietary advice.",
-        provider="groq",
+        confidence_note=CONFIDENCE_NOTE,
+        provider=provider,
         model=model,
     )
 
@@ -517,18 +450,28 @@ async def generate_report(
     """
     Generate an AI-powered product report.
 
-    Falls back gracefully:
-    1. Try configured AI provider (OpenAI, Gemini, or Groq)
-    2. If no API key or provider fails, use rule-based fallback
-    """
+    Walks the provider chain (gemini → groq → cerebras → openrouter) and takes
+    the first success. The rule-based fallback runs only when every configured
+    provider has failed.
 
-    # If no API key, go straight to fallback
-    if not settings.AI_API_KEY:
+    That ordering is the point of the chain. Previously a single provider was
+    tried once, so one transient error — most often a reasoning model spending
+    its token budget on thought and being cut off mid-JSON — dropped the user
+    to rule-based prose even though three other providers were sitting idle.
+    """
+    from app.ai.providers import AllProvidersFailed, complete_json, resolve_chain
+
+    def fallback() -> AIReport:
         return _generate_fallback(
             product_name, suitability_score, verdict,
             allergen_safe, flags, goal_alignments,
             user_feedback_examples,
         )
+
+    # No provider configured at all is not a failure to report on; it is the
+    # documented no-key mode.
+    if not resolve_chain():
+        return fallback()
 
     prompt = _build_prompt(
         product_name=product_name,
@@ -547,18 +490,20 @@ async def generate_report(
     )
 
     try:
-        provider = settings.AI_PROVIDER.lower()
-        if provider in ("gemini", "google"):
-            return await _generate_with_gemini(prompt)
-        elif provider == "groq":
-            return await _generate_with_groq(prompt)
-        else:
-            return await _generate_with_openai(prompt)
-    except Exception as e:
-        print(f"⚠️ AI provider '{settings.AI_PROVIDER}' failed: {e}")
-        print("Falling back to rule-based report generation.")
-        return _generate_fallback(
-            product_name, suitability_score, verdict,
-            allergen_safe, flags, goal_alignments,
-            user_feedback_examples,
+        result = await complete_json(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            # A full report is 1,000-1,500 tokens of visible output, and a
+            # reasoning model spends more than that again before it starts
+            # writing. The old 2,000 ceiling cut it off mid-JSON often enough
+            # to look like the AI was simply broken.
+            max_tokens=4000,
+            temperature=0.4,
         )
+        return _report_from_data(result.data, result.provider, result.model)
+    except AllProvidersFailed as e:
+        print(f"⚠️ {e}")
+        print("Falling back to rule-based report generation.")
+        return fallback()

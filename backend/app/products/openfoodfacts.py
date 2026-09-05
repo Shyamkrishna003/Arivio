@@ -20,10 +20,84 @@ class OFFProduct(BaseModel):
     allergens: Optional[str] = None
     serving_size: Optional[str] = None
 
+class OFFSearchCandidate(BaseModel):
+    """
+    A name-search hit that has NOT been imported.
+
+    Search results are shown as candidates and only become a Product row when
+    the user picks one. Importing every hit would fill the catalogue with
+    dozens of loosely-matched rows per search, which then compete against real
+    products in every later local search.
+    """
+    code: str
+    name: str
+    brand: Optional[str] = None
+    category: Optional[str] = None
+    image_url: Optional[str] = None
+
+
 class OFFClient:
     def __init__(self):
         self.base_url = settings.OPEN_FOOD_FACTS_API_URL
-        self.client = httpx.AsyncClient(base_url=self.base_url, timeout=10.0)
+        self.client = httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=10.0,
+            headers={"User-Agent": settings.OPEN_FOOD_FACTS_USER_AGENT},
+        )
+
+    async def search_by_name(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Search Open Food Facts by product name.
+
+        Returns lightweight candidates, not full products: the caller shows
+        them for selection and fetches the full record by barcode only for the
+        one the user picks. Requesting just the fields we render keeps the
+        response small, which matters because this call is on a user's
+        critical path.
+
+        An upstream failure returns an empty list rather than raising — the
+        local results are still worth showing.
+        """
+        params = {
+            "search_terms": query,
+            "search_simple": 1,
+            "action": "process",
+            "json": 1,
+            "page_size": limit,
+            "fields": "code,product_name,brands,categories,image_url",
+        }
+        try:
+            # Absolute URL: name search is on the legacy CGI endpoint, not
+            # under the versioned API this client's base_url points at.
+            response = await self.client.get(
+                settings.OPEN_FOOD_FACTS_SEARCH_URL,
+                params=params,
+                timeout=settings.OPEN_FOOD_FACTS_SEARCH_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (httpx.HTTPError, ValueError):
+            return []
+
+        candidates: List[Dict[str, Any]] = []
+        for raw in data.get("products", []):
+            code = str(raw.get("code") or "").strip()
+            name = (raw.get("product_name") or "").strip()
+            # A hit with no barcode cannot be imported (the import fetches the
+            # full record by code), and one with no name cannot be shown.
+            if not code or not name:
+                continue
+            brands = raw.get("brands") or ""
+            categories = raw.get("categories") or ""
+            candidates.append(OFFSearchCandidate(
+                code=code,
+                name=name,
+                brand=brands.split(",")[0].strip() or None if brands else None,
+                category=categories.split(",")[0].strip() or None if categories else None,
+                image_url=raw.get("image_url") or None,
+            ).model_dump())
+
+        return candidates
 
     async def get_product_by_barcode(self, barcode: str) -> Optional[Dict[str, Any]]:
         """Fetch product data from Open Food Facts by barcode."""

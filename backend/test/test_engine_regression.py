@@ -358,7 +358,7 @@ check("long float rounded", _fmt(55.4545454545455), "55.5")
 check("whole number stays whole", _fmt(12.0), "12")
 check("one decimal preserved", _fmt(0.5), "0.5")
 check("int passes through", _fmt(3), "3")
-_, _nflags = _calculate_nutritional_quality(
+_, _nflags, _ = _calculate_nutritional_quality(
     {'total_sugars_g': 55.4545454545455, 'saturated_fat_g': 17.2727272727273,
      'sodium_mg': 123.456, 'protein_g': 20.0, 'fiber_g': 5.0})
 _ntext = " | ".join(f.description for f in _nflags)
@@ -367,6 +367,335 @@ _ntext = " | ".join(f.description for f in _nflags)
 check("no 'per serving' claim", "per serving" in _ntext, False)
 check("states the per-100g basis", "per 100g" in _ntext, True)
 check("no runaway precision", "55.4545" in _ntext, False)
+
+print("\n=== a disqualifying nutrient caps the score, it is not averaged away ===")
+# Soy sauce: 5,493mg sodium per 100g, nine times the "high" line. The additive
+# scoring repaid its -12 with low sugar, low saturated fat and protein, so it
+# scored 73 overall and 85 against a weight-loss goal — ahead of olive oil.
+_soy = dict(energy_kcal=53, protein_g=8, total_fat_g=0, saturated_fat_g=0,
+            total_carbohydrates_g=4.9, total_sugars_g=0.4, fiber_g=0.8, sodium_mg=5493)
+_soy_ing = [{"name": n, "position": i + 1}
+            for i, n in enumerate(["water", "soybeans", "wheat", "salt"])]
+
+def _score(nutrition, ingredients, goal=None):
+    return calculate_suitability(
+        product_nutrition=nutrition, product_allergens=[], product_ingredients=ingredients,
+        user_goals=[{"goal_type": goal}] if goal else [],
+        user_allergies=[], user_preferences=[])
+
+_r = _score(_soy, _soy_ing)
+check("soy sauce is flagged extreme", _r.breakdown["nutrient_extreme"], "extreme")
+check("soy sauce capped overall", _r.overall_score <= 35, True)
+# The goal term is the reason capping only the quality score was not enough:
+# a weight-loss profile never looks at sodium.
+_r = _score(_soy, _soy_ing, "weight loss")
+check("soy sauce capped for weight loss too", _r.overall_score <= 35, True)
+
+# Two levels, so "very high" and "off the scale" stay distinguishable.
+_choc = dict(energy_kcal=534, protein_g=7.3, total_fat_g=30, saturated_fat_g=18.5,
+             total_carbohydrates_g=59, total_sugars_g=56, fiber_g=3.4, sodium_mg=79)
+check("56g sugar is severe, not extreme",
+      _score(_choc, [{"name": "sugar", "position": 1}]).breakdown["nutrient_extreme"], "severe")
+_honey = dict(energy_kcal=304, protein_g=0.3, total_fat_g=0, saturated_fat_g=0,
+              total_carbohydrates_g=82, total_sugars_g=82, fiber_g=0.2, sodium_mg=4)
+check("82g sugar is extreme",
+      _score(_honey, [{"name": "honey", "position": 1}]).breakdown["nutrient_extreme"], "extreme")
+
+# No collateral damage: ordinary foods, and fat-dense whole foods in
+# particular, must be untouched. Saturated fat is deliberately NOT a capping
+# nutrient — 14g/100g is extreme for a biscuit and normal for olive oil, and
+# telling those apart needs category awareness we do not have yet.
+_oil = dict(energy_kcal=884, protein_g=0, total_fat_g=100, saturated_fat_g=14,
+            total_carbohydrates_g=0, total_sugars_g=0, fiber_g=0, sodium_mg=2)
+_r = _score(_oil, [{"name": "olive oil", "position": 1}])
+check("olive oil not capped", _r.breakdown["nutrient_extreme"], "none")
+# Its overall score is no longer 58 — category awareness later lifted it to 91,
+# which is that change's business. What matters here is that the
+# disqualifying-nutrient rule is not what moves it: saturated fat must never
+# trigger the cap, whatever else changes around it.
+check("saturated fat never triggers the cap",
+      _score({"saturated_fat_g": 87, "total_fat_g": 100}, []).breakdown["nutrient_extreme"],
+      "none")
+
+_bread = dict(energy_kcal=265, protein_g=9, total_fat_g=3.2, saturated_fat_g=0.7,
+              total_carbohydrates_g=49, total_sugars_g=5, fiber_g=2.7, sodium_mg=490)
+_bread_ing = [{"name": n, "position": i + 1} for i, n in enumerate(
+    ["wheat flour", "water", "yeast", "salt", "sugar", "emulsifier"])]
+check("bread below the line is untouched",
+      _score(_bread, _bread_ing).breakdown["nutrient_extreme"], "none")
+
+_lentils = dict(energy_kcal=116, protein_g=9, total_fat_g=0.4, saturated_fat_g=0.1,
+                total_carbohydrates_g=20, total_sugars_g=1.8, fiber_g=7.9, sodium_mg=2)
+_r = _score(_lentils, [{"name": "lentils", "position": 1}, {"name": "water", "position": 2}])
+check("lentils still score well", _r.overall_score, 98)
+
+# Missing data must not be read as a disqualifying amount.
+check("no nutrition data is not extreme",
+      _score(None, []).breakdown["nutrient_extreme"], "none")
+check("zero sodium is not extreme",
+      _score({"sodium_mg": 0, "total_sugars_g": 0}, []).breakdown["nutrient_extreme"], "none")
+
+# The cap has to be explained, like every other finding in the engine.
+_flags = " | ".join(f.title + f.description for f in _score(_soy, _soy_ing).flags)
+check("the cap is explained to the user", "sodium" in _flags.lower(), True)
+check("it says how far past the line", "9.2" in _flags, True)
+
+print("\n=== category awareness: a nutrient absent by nature is not a failure ===")
+from app.personalization.categories import resolve_category
+
+_OIL = dict(energy_kcal=884, protein_g=0, total_fat_g=100, saturated_fat_g=14,
+            total_carbohydrates_g=0, total_sugars_g=0, fiber_g=0, sodium_mg=2, cholesterol_mg=0)
+_BUTTER = dict(energy_kcal=717, protein_g=0.9, total_fat_g=81, saturated_fat_g=51,
+               total_carbohydrates_g=0.1, total_sugars_g=0.1, fiber_g=0, sodium_mg=11)
+_COCONUT = dict(energy_kcal=892, protein_g=0, total_fat_g=100, saturated_fat_g=87,
+                total_carbohydrates_g=0, total_sugars_g=0, fiber_g=0, sodium_mg=0)
+
+def _cscore(nutrition, ingredients, category=None, goal=None):
+    return calculate_suitability(
+        product_nutrition=nutrition, product_allergens=[],
+        product_ingredients=[{"name": n, "position": i + 1} for i, n in enumerate(ingredients)],
+        user_goals=[{"goal_type": goal}] if goal else [],
+        user_allergies=[], user_preferences=[], product_category=category)
+
+# Olive oil scored 58 — below white bread — because it scored zero for protein
+# and zero for fibre, which an oil has none of by nature.
+_r = _cscore(_OIL, ["olive oil"], "Olive oils")
+check("olive oil resolved as a fat", _r.breakdown["category"], "added_fats")
+check("olive oil no longer marked down for absent protein/fibre",
+      _r.overall_score >= 85, True)
+
+# Fat quality, not fat quantity, has to separate them.
+_olive = _cscore(_OIL, ["olive oil"], "Olive oils").overall_score
+_butt = _cscore(_BUTTER, ["cream", "salt"], "Butters").overall_score
+_coco = _cscore(_COCONUT, ["coconut oil"], "Vegetable oils").overall_score
+check(f"olive ({_olive}) beats butter ({_butt})", _olive > _butt, True)
+check(f"butter ({_butt}) beats coconut oil ({_coco})", _butt > _coco, True)
+
+# An oil with no category at all is still recognised from its ingredients.
+check("sole-ingredient oil inferred without a category",
+      _cscore(_OIL, ["olive oil"], None).breakdown["category"], "added_fats")
+
+print("\n=== category resolution does not fire on lookalikes ===")
+_CHOC = {"total_fat_g": 30, "protein_g": 7.3}
+_PB = {"total_fat_g": 50, "protein_g": 25}
+# Both of these were real false positives: "cola" is a substring of
+# "chocolate", and Open Food Facts files a hazelnut spread under
+# "Christmas foods and drinks".
+check("'Chocolate biscuits' is not a drink",
+      resolve_category("Chocolate biscuits", None, _CHOC), None)
+check("'Bonbons de chocolat' is not a drink",
+      resolve_category("Bonbons de chocolat", None, _CHOC), None)
+check("'Christmas foods and drinks' is not a drink",
+      resolve_category("Christmas foods and drinks", None, _CHOC), None)
+check("'Butter biscuits' is not a cooking fat",
+      resolve_category("Butter biscuits", None, _CHOC), None)
+check("'Butternut squash' is not a drink",
+      resolve_category("Butternut squash", None, {}), None)
+# Composition has to agree with the label: peanut butter is 25g protein.
+check("peanut butter is not a cooking fat despite the name",
+      resolve_category("Peanut butters", None, _PB), None)
+check("a fat labelled as one, with the composition to match",
+      resolve_category("Butters", None, {"total_fat_g": 81, "protein_g": 0.9}), "added_fats")
+check("real drinks still resolve",
+      resolve_category("Diet cola soft drink", None, {}), "beverages")
+check("an unknown category means the ordinary path",
+      resolve_category("Dried meals", None, {}), None)
+check("no category at all is safe", resolve_category(None, None, {}), None)
+
+print("\n=== drinks are scored on the stricter sugar scale ===")
+_COLA = dict(energy_kcal=42, protein_g=0, total_fat_g=0, saturated_fat_g=0,
+             total_carbohydrates_g=10.6, total_sugars_g=10.6, fiber_g=0, sodium_mg=4)
+_ing = ["carbonated water", "sugar", "caramel colour", "phosphoric acid", "caffeine"]
+_as_drink = _cscore(_COLA, _ing, "Sodas").overall_score
+_as_food = _cscore(_COLA, _ing, None).overall_score
+check(f"10.6g of sugar counts for more in a drink ({_as_food} as food, {_as_drink} as drink)",
+      _as_drink < _as_food, True)
+
+print("\n=== everything else is untouched ===")
+for _name, _n, _ing, _cat, _want in [
+    ("almonds", dict(energy_kcal=579, protein_g=21, total_fat_g=50, saturated_fat_g=3.8,
+                     total_carbohydrates_g=22, total_sugars_g=4.4, fiber_g=12.5, sodium_mg=1),
+     ["almonds"], "Nuts", 95),
+    ("white bread", dict(energy_kcal=265, protein_g=9, total_fat_g=3.2, saturated_fat_g=0.7,
+                         total_carbohydrates_g=49, total_sugars_g=5, fiber_g=2.7, sodium_mg=490),
+     ["wheat flour", "water", "yeast", "salt", "sugar", "emulsifier"], "Breads", 86),
+    ("lentils", dict(energy_kcal=116, protein_g=9, total_fat_g=0.4, saturated_fat_g=0.1,
+                     total_carbohydrates_g=20, total_sugars_g=1.8, fiber_g=7.9, sodium_mg=2),
+     ["lentils", "water"], "Legumes", 98),
+    ("milk chocolate", dict(energy_kcal=534, protein_g=7.3, total_fat_g=30, saturated_fat_g=18.5,
+                            total_carbohydrates_g=59, total_sugars_g=56, fiber_g=3.4, sodium_mg=79),
+     ["sugar", "cocoa butter", "milk solids"], "Chocolate biscuits", 55),
+    # The disqualifying-nutrient rule must survive: a condiment is a portion
+    # problem, not a category-threshold one, and is deliberately not softened.
+    ("soy sauce", dict(energy_kcal=53, protein_g=8, total_fat_g=0, saturated_fat_g=0,
+                       total_carbohydrates_g=4.9, total_sugars_g=0.4, fiber_g=0.8, sodium_mg=5493),
+     ["water", "soybeans", "wheat", "salt"], "Sauces", 35),
+]:
+    check(f"{_name} unchanged", _cscore(_n, _ing, _cat).overall_score, _want)
+
+print("\n=== portion realism: judged on what you actually use ===")
+_SPICE = dict(energy_kcal=247, protein_g=4, total_fat_g=1.2, saturated_fat_g=0.3,
+              total_carbohydrates_g=81, total_sugars_g=2.2, fiber_g=53, sodium_mg=10)
+_SALT = dict(energy_kcal=0, protein_g=0, total_fat_g=0, saturated_fat_g=0,
+             total_carbohydrates_g=0, total_sugars_g=0, fiber_g=0, sodium_mg=38758)
+_SOY = dict(energy_kcal=53, protein_g=8, total_fat_g=0, saturated_fat_g=0,
+            total_carbohydrates_g=4.9, total_sugars_g=0.4, fiber_g=0.8, sodium_mg=5493)
+_KETCHUP = dict(energy_kcal=112, protein_g=1.3, total_fat_g=0.1, saturated_fat_g=0,
+                total_carbohydrates_g=26, total_sugars_g=22, fiber_g=0.3, sodium_mg=907)
+_COLA_REG = dict(energy_kcal=42, protein_g=0, total_fat_g=0, saturated_fat_g=0,
+                 total_carbohydrates_g=10.6, total_sugars_g=10.6, fiber_g=0, sodium_mg=4)
+_MILK = dict(energy_kcal=61, protein_g=3.2, total_fat_g=3.3, saturated_fat_g=1.9,
+             total_carbohydrates_g=4.8, total_sugars_g=5.1, fiber_g=0, sodium_mg=43)
+
+# Cinnamon scored 93 — above white bread — on the figures for 100g of a spice.
+_r = _cscore(_SPICE, ["cinnamon"], "Spices")
+check("cinnamon gets a realistic portion", _r.breakdown["reference_portion_g"], 2.0)
+check(f"cinnamon no longer reads as a top food ({_r.overall_score})",
+      _r.overall_score <= 70, True)
+check("and it says why",
+      any("small amounts" in f.title for f in _r.flags), True)
+
+# The rule must not become a loophole. A tiny portion of something genuinely
+# concentrated still delivers a lot.
+_r = _cscore(_SALT, ["salt"], "Table salt")
+check("2g of salt is still extreme sodium", _r.breakdown["nutrient_extreme"], "extreme")
+_r = _cscore(_SOY, ["water", "soybeans", "wheat", "salt"], "Sauces")
+check("a tablespoon of soy sauce is still extreme", _r.breakdown["nutrient_extreme"], "extreme")
+check("soy sauce still capped", _r.overall_score <= 35, True)
+check("the flag now quotes the serving, not just per-100g",
+      any("serving" in f.description and "daily reference" in f.description
+          for f in _r.flags), True)
+
+# …while a condiment that is genuinely modest per serving is not condemned.
+_r = _cscore(_KETCHUP, ["tomatoes", "sugar", "vinegar", "salt"], "Ketchup")
+check("a tablespoon of ketchup is not disqualifying",
+      _r.breakdown["nutrient_extreme"], "none")
+
+# Portions cut both ways: a glass of a drink is 250ml, so its sugar counts for
+# more than the per-100ml figure suggests.
+_r = _cscore(_COLA_REG, ["carbonated water", "sugar", "caramel colour"], "Sodas")
+check("a glass of regular cola is flagged on sugar",
+      _r.breakdown["nutrient_extreme"], "severe")
+
+# The negative control for that: milk is also a 250ml drink, and its sugar is
+# lactose. Judging total sugars against the free-sugars limit would have marked
+# plain milk down like a soft drink — which is why the reference is 90g.
+_r = _cscore(_MILK, ["milk"], "Milk")
+check("plain milk is not flagged for its lactose",
+      _r.breakdown["nutrient_extreme"], "none")
+check("milk unchanged", _r.overall_score, 75)
+
+# The ceiling is a ceiling, never a floor. An earlier version applied a
+# neutral minimum too, which would have lifted an allergen-capped 15 to 45.
+_r = calculate_suitability(
+    product_nutrition=_SPICE,
+    product_allergens=[{"allergen": "cinnamon", "certainty": "declared"}],
+    product_ingredients=[{"name": "cinnamon", "position": 1}],
+    user_goals=[],
+    user_allergies=[{"allergen": "cinnamon", "allergy_type": "allergy", "severity": "severe"}],
+    user_preferences=[], product_category="Spices")
+check("a negligible portion never lifts an allergen cap", _r.overall_score <= 15, True)
+check("and it is still reported unsafe", _r.allergen_safe, False)
+
+# Products with no portion category keep the per-100g basis untouched.
+for _name, _n, _ing, _cat, _want in [
+    ("white bread", dict(energy_kcal=265, protein_g=9, total_fat_g=3.2, saturated_fat_g=0.7,
+                         total_carbohydrates_g=49, total_sugars_g=5, fiber_g=2.7, sodium_mg=490),
+     ["wheat flour", "water", "yeast", "salt"], "Breads", None),
+    ("almonds", dict(energy_kcal=579, protein_g=21, total_fat_g=50, saturated_fat_g=3.8,
+                     total_carbohydrates_g=22, total_sugars_g=4.4, fiber_g=12.5, sodium_mg=1),
+     ["almonds"], "Nuts", 95),
+]:
+    _r = _cscore(_n, _ing, _cat)
+    check(f"{_name} has no portion applied", _r.breakdown["reference_portion_g"], None)
+    if _want:
+        check(f"{_name} unchanged", _r.overall_score, _want)
+
+# A bulk sauce must not be mistaken for a spoonful one.
+check("pasta sauce is not treated as a condiment",
+      resolve_category("Pasta sauces", None, {}), None)
+check("soup is not treated as a condiment",
+      resolve_category("Soups", None, {}), None)
+
+print("\n=== absence of bad is not presence of good ===")
+_DIET_COLA = dict(energy_kcal=0.3, protein_g=0, total_fat_g=0, saturated_fat_g=0,
+                  total_carbohydrates_g=0, total_sugars_g=0, fiber_g=0, sodium_mg=4)
+_JELLY = dict(energy_kcal=8, protein_g=1, total_fat_g=0, saturated_fat_g=0,
+              total_carbohydrates_g=0.8, total_sugars_g=0, fiber_g=0, sodium_mg=60)
+_YOGHURT = dict(energy_kcal=61, protein_g=3.5, total_fat_g=3.3, saturated_fat_g=2.1,
+                total_carbohydrates_g=4.7, total_sugars_g=4.7, fiber_g=0, sodium_mg=46)
+# Deliberately low in sugar: a fortified drink that is ALSO sugary gets capped
+# for its sugar (a 250ml glass of the 7g/100ml version carries 17.5g), which
+# would test the portion rule rather than the one below.
+_FORTIFIED = dict(energy_kcal=10, protein_g=0, total_fat_g=0, saturated_fat_g=0,
+                  total_carbohydrates_g=2, total_sugars_g=2, fiber_g=0, sodium_mg=5,
+                  vitamin_c_mg=30)
+
+# Diet cola scored 92 for nutritional quality — no sugar, no sodium, no
+# saturated fat, nothing at all. Plain yoghurt scored 88, because yoghurt has
+# 2.1g of saturated fat and forfeited a bonus the cola kept by being water and
+# sweetener.
+_cola = _cscore(_DIET_COLA, ["carbonated water", "caramel colour", "aspartame"],
+                "Diet cola soft drink")
+_yog = _cscore(_YOGHURT, ["milk", "live cultures"], "Yogurts")
+check(f"an empty drink no longer scores as nutritious ({_cola.nutritional_quality_score})",
+      _cola.nutritional_quality_score <= 60, True)
+check(f"yoghurt ({_yog.nutritional_quality_score}) now outranks diet cola "
+      f"({_cola.nutritional_quality_score})",
+      _yog.nutritional_quality_score > _cola.nutritional_quality_score, True)
+check("yoghurt itself is unchanged", _yog.nutritional_quality_score, 88)
+check("and the reason is explained",
+      any("Contributes little" in f.title for f in _cola.flags), True)
+
+# The same applies to anything that is mostly water and additives.
+_j = _cscore(_JELLY, ["water", "gelatine", "aspartame", "artificial flavour", "colour e129"],
+             "Desserts")
+check(f"sugar-free jelly likewise ({_j.nutritional_quality_score})",
+      _j.nutritional_quality_score <= 60, True)
+
+# "Source of" a micronutrient is the EU definition — 15% of the NRV per 100g.
+# A fortified drink supplies something, so it keeps its credit.
+_f = _cscore(_FORTIFIED, ["water", "orange juice", "vitamin c"], "Beverages")
+check(f"a fortified drink still earns credit ({_f.nutritional_quality_score})",
+      _f.nutritional_quality_score > 60, True)
+
+# Real foods must be untouched.
+for _name, _n, _ing, _cat, _want in [
+    ("lentils", dict(energy_kcal=116, protein_g=9, total_fat_g=0.4, saturated_fat_g=0.1,
+                     total_carbohydrates_g=20, total_sugars_g=1.8, fiber_g=7.9, sodium_mg=2),
+     ["lentils", "water"], "Legumes", 100),
+    ("almonds", dict(energy_kcal=579, protein_g=21, total_fat_g=50, saturated_fat_g=3.8,
+                     total_carbohydrates_g=22, total_sugars_g=4.4, fiber_g=12.5, sodium_mg=1),
+     ["almonds"], "Nuts", 100),
+    ("white bread", dict(energy_kcal=265, protein_g=9, total_fat_g=3.2, saturated_fat_g=0.7,
+                         total_carbohydrates_g=49, total_sugars_g=5, fiber_g=2.7, sodium_mg=490),
+     ["wheat flour", "water", "yeast", "salt"], "Breads", 88),
+    ("whole milk", dict(energy_kcal=61, protein_g=3.2, total_fat_g=3.3, saturated_fat_g=1.9,
+                        total_carbohydrates_g=4.8, total_sugars_g=5.1, fiber_g=0, sodium_mg=43),
+     ["milk"], "Milk", 81),
+]:
+    check(f"{_name} nutritional quality unchanged",
+          _cscore(_n, _ing, _cat).nutritional_quality_score, _want)
+
+# A cooking oil has no protein or fibre BY NATURE, which is not the same as
+# being empty — it must keep its credit, or category awareness is undone.
+_oilq = _cscore(dict(energy_kcal=884, protein_g=0, total_fat_g=100, saturated_fat_g=14,
+                     total_carbohydrates_g=0, total_sugars_g=0, fiber_g=0, sodium_mg=2),
+                ["olive oil"], "Olive oils")
+check("an oil is exempt, not penalised", _oilq.nutritional_quality_score, 80)
+check("olive oil overall unchanged", _oilq.overall_score, 91)
+
+# Missing data is not emptiness either.
+from app.personalization.engine import _provides_nutrition
+check("no nutrition data -> cannot tell", _provides_nutrition(None), None)
+check("no protein or fibre recorded -> cannot tell",
+      _provides_nutrition({"total_sugars_g": 5}), None)
+check("measured zeros -> supplies nothing",
+      _provides_nutrition({"protein_g": 0, "fiber_g": 0}), False)
+check("protein makes it a food", _provides_nutrition({"protein_g": 3, "fiber_g": 0}), True)
+check("fibre makes it a food", _provides_nutrition({"protein_g": 0, "fiber_g": 1.5}), True)
+check("15% of the iron NRV makes it a food",
+      _provides_nutrition({"protein_g": 0, "fiber_g": 0, "iron_mg": 2.1}), True)
 
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILURES: {fails}"))
 sys.exit(1 if fails else 0)

@@ -12,6 +12,7 @@ import Login from './pages/auth/Login';
 import Register from './pages/auth/Register';
 import Dashboard from './pages/dashboard/Dashboard';
 import Scan from './pages/scan/Scan';
+import LabelConfirm from './pages/scan/LabelConfirm';
 import ProductSearch from './pages/product/ProductSearch';
 import ProductSubmit from './pages/product/ProductSubmit';
 import ProductDetail from './pages/product/ProductDetail';
@@ -100,6 +101,16 @@ function AppRoutes() {
           element={
             <ProtectedRoute>
               <Scan />
+            </ProtectedRoute>
+          }
+        />
+        {/* Where a photographed label is corrected before anything is
+            analyzed (PRD §14). Keyed by extraction id so a reload survives. */}
+        <Route
+          path="/scan/confirm/:extractionId"
+          element={
+            <ProtectedRoute>
+              <LabelConfirm />
             </ProtectedRoute>
           }
         />

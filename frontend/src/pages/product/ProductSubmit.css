@@ -110,3 +110,116 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ── Duplicate guard ──
+   Shown when the server refuses to create a product that already exists under
+   almost this name. It is a block the user must resolve, not a hint, so it
+   sits inline with the form rather than beside it. */
+.duplicate-block {
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.06);
+  border-radius: var(--radius-lg);
+}
+
+.duplicate-lead {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.duplicate-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  margin-bottom: var(--space-2);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-primary);
+  border-radius: var(--radius-md);
+  text-decoration: none;
+  color: var(--color-text-primary);
+  transition: border-color var(--transition-fast);
+}
+
+.duplicate-row:hover { border-color: var(--color-accent-primary); }
+
+.duplicate-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.duplicate-score {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Product photo ── */
+.image-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-6);
+  border: 2px dashed var(--color-border-secondary);
+  border-radius: var(--radius-lg);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.image-dropzone:hover {
+  border-color: var(--color-accent-primary);
+  background: rgba(99, 102, 241, 0.04);
+}
+
+.image-preview {
+  position: relative;
+  display: inline-block;
+  max-width: 240px;
+}
+
+.image-preview img {
+  display: block;
+  width: 100%;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border-primary);
+}
+
+.image-remove {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  cursor: pointer;
+}
+
+.image-remove:hover { background: var(--color-accent-danger); }
+
+.spin { animation: submit-spin 0.9s linear infinite; }
+
+@keyframes submit-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation-duration: 2.6s; }
+}

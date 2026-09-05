@@ -25,6 +25,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from app.personalization import categories as _cat
+
 
 # ──────────────────────────────────────────────
 # Data Structures
@@ -862,11 +864,53 @@ def _check_diet_compatibility(
     return flags, "none", []
 
 
+def nutrition_row_to_dict(row) -> Optional[dict]:
+    """
+    Flatten a NutritionFact row into the dict every scorer reads.
+
+    This mapping was written out at four call sites — suitability,
+    alternatives (twice) and the AI report — which meant adding a nutrient the
+    engine could see required remembering all four. A profile referencing a
+    key that one site happened to omit would silently score as "no data".
+
+    Note `dietary_fiber_g` is exposed as `fiber_g`: the column and the
+    threshold tables have always spelled it differently, and this is the one
+    place that reconciles them.
+
+    All values are per 100g, which is the basis the thresholds are calibrated
+    for (see NutritionFact).
+    """
+    if row is None:
+        return None
+    return {
+        "energy_kcal": row.energy_kcal,
+        "protein_g": row.protein_g,
+        "total_fat_g": row.total_fat_g,
+        "saturated_fat_g": row.saturated_fat_g,
+        "trans_fat_g": row.trans_fat_g,
+        "total_carbohydrates_g": row.total_carbohydrates_g,
+        "total_sugars_g": row.total_sugars_g,
+        "added_sugars_g": row.added_sugars_g,
+        "fiber_g": row.dietary_fiber_g,
+        "sodium_mg": row.sodium_mg,
+        "cholesterol_mg": row.cholesterol_mg,
+        # Micronutrients, needed by the health-context profiles (iron for low
+        # haemoglobin, potassium for reduced kidney function, and so on).
+        "potassium_mg": row.potassium_mg,
+        "iron_mg": row.iron_mg,
+        "calcium_mg": row.calcium_mg,
+        "vitamin_d_mcg": row.vitamin_d_mcg,
+        "vitamin_c_mg": row.vitamin_c_mg,
+        "vitamin_a_mcg": row.vitamin_a_mcg,
+    }
+
+
 def _evaluate_goal_alignment(
     goal_type: str,
     nutrition: Optional[dict],
     custom_profiles: dict = None,
     status_message: Optional[str] = None,
+    category_profile: Optional[dict] = None,
 ) -> GoalAlignment:
     """
     Evaluate how well a product's nutrition aligns with a specific health goal.
@@ -927,10 +971,21 @@ def _evaluate_goal_alignment(
         if nutrient not in prefer_low and nutrient not in prefer_high:
             continue
 
+        # A category can substitute a more meaningful basis for a nutrient —
+        # for a cooking oil, the share of fat that is saturated rather than the
+        # absolute grams — and must bring its own thresholds with it.
+        override = _cat.nutrient_thresholds(category_profile, nutrient)
+        if override:
+            limits = override
+
         if not isinstance(limits, dict) or "good" not in limits or "bad" not in limits:
             continue
 
         value = nutrition.get(nutrient)
+        # None covers both "not measured" and "carries no information for this
+        # kind of product" — apply_category_view maps the latter onto the
+        # former precisely so this skip handles both. Scoring a structurally
+        # absent nutrient as zero is what put olive oil below white bread.
         if value is None:
             continue
 
@@ -940,7 +995,9 @@ def _evaluate_goal_alignment(
             continue
 
         score_val = 0
-        pretty = nutrient.replace("_", " ").title()
+        pretty = _cat.nutrient_label(
+            category_profile, nutrient, nutrient.replace("_", " ").title()
+        )
 
         if nutrient in prefer_low:
             if value <= good:
@@ -1115,13 +1172,388 @@ def _evaluate_preferences(
     return flags, total, level
 
 
-def _calculate_nutritional_quality(nutrition: Optional[dict]) -> tuple[int, list[SuitabilityFlag]]:
+# ──────────────────────────────────────────────
+# Health context (from uploaded documents)
+# ──────────────────────────────────────────────
+
+# How far health context may move a score. Larger than the preference caps
+# because these come from measured clinical values rather than a stated
+# preference — but still an adjustment rather than a hard cap, because a lab
+# reading is context for a decision, not a prohibition on a food.
+#
+# Asymmetric for the same reason preferences are: a product working against a
+# marker that is already out of range matters more than one that happens to
+# suit it.
+_HEALTH_PENALTY_CAP = 30
+_HEALTH_BONUS_CAP = 10
+
+# Per-condition ceilings, scaled by how strong the nutritional link is.
+_HEALTH_SEVERITY_WEIGHT = {"high": 1.0, "moderate": 0.7, "low": 0.4}
+
+
+def _evaluate_health_context(
+    health_conditions: list[dict],
+    nutrition: Optional[dict],
+) -> tuple[list[SuitabilityFlag], int, str]:
+    """
+    Score the product against patterns found in the user's health documents.
+
+    `health_conditions` are resolved profiles from app.health.profiles — the
+    engine is handed the medical conclusions rather than reaching them, so all
+    the clinical thresholds live in one reviewable table and this stays generic
+    arithmetic.
+
+    Each condition is scored 0-100 over its own nutrients using the same
+    threshold interpolation as goal alignment, then mapped onto points. Returns
+    (flags, adjustment, level) where level is:
+        "none"    — nothing applied
+        "watch"   — a product that works mildly against a marker
+        "avoid"   — a product that works strongly against one
+
+    Deliberately never returns a hard cap or a "not suitable" verdict. A high
+    reading is a reason to inform someone, not for software to forbid them a
+    food — PRD §10, the platform must not diagnose or replace clinical care.
+    """
+    flags: list[SuitabilityFlag] = []
+    if not health_conditions or not nutrition:
+        return flags, 0, "none"
+
+    total = 0.0
+    worst = 0.0
+
+    for condition in health_conditions:
+        thresholds = condition.get("thresholds") or {}
+        weights = condition.get("weights") or {}
+        prefer_low = set(condition.get("prefer_low") or [])
+        prefer_high = set(condition.get("prefer_high") or [])
+
+        scores: list[tuple[float, float]] = []   # (0-100 score, weight)
+        offenders: list[str] = []
+        helpers: list[str] = []
+
+        for nutrient, limits in thresholds.items():
+            if nutrient not in prefer_low and nutrient not in prefer_high:
+                continue
+            if not isinstance(limits, dict) or "good" not in limits or "bad" not in limits:
+                continue
+
+            value = nutrition.get(nutrient)
+            # Missing data is skipped, never counted as satisfied — that would
+            # reward a product for having an incomplete label.
+            if value is None:
+                continue
+
+            good, bad = limits["good"], limits["bad"]
+            if good == bad:
+                continue
+
+            if nutrient in prefer_low:
+                if value <= good:
+                    score = 100.0
+                elif value >= bad:
+                    score = 0.0
+                else:
+                    score = (1 - (value - good) / (bad - good)) * 100
+            else:
+                if value >= good:
+                    score = 100.0
+                elif value <= bad:
+                    score = 0.0
+                else:
+                    score = ((value - bad) / (good - bad)) * 100
+
+            score = max(0.0, min(100.0, score))
+            weight = float(weights.get(nutrient, 1.0))
+            scores.append((score, weight))
+
+            pretty = _HEALTH_NUTRIENT_LABELS.get(nutrient, nutrient.replace("_", " "))
+            if score <= 35:
+                offenders.append(f"{pretty} {_fmt(value)}")
+            elif score >= 80:
+                helpers.append(f"{pretty} {_fmt(value)}")
+
+        if not scores:
+            continue
+
+        total_weight = sum(w for _, w in scores) or 1.0
+        condition_score = sum(s * w for s, w in scores) / total_weight
+        severity = _HEALTH_SEVERITY_WEIGHT.get(condition.get("severity", "moderate"), 0.7)
+
+        # 0 → full penalty, 50 → neutral, 100 → full bonus.
+        if condition_score < 50:
+            points = -((50 - condition_score) / 50) * _HEALTH_PENALTY_CAP * severity
+        else:
+            points = ((condition_score - 50) / 50) * _HEALTH_BONUS_CAP * severity
+
+        total += points
+        worst = min(worst, points)
+
+        label = condition.get("label", "your recent results")
+        if points <= -8:
+            flags.append(SuitabilityFlag(
+                flag_type="warning",
+                category="health",
+                title=f"Works against your recent results — {label.lower()}",
+                # Phrased as an observation about the product relative to a
+                # reading, never as a statement about the person's health.
+                description=(
+                    f"{', '.join(offenders) or 'This product'} per 100g. "
+                    f"{condition.get('explanation', '')}"
+                ).strip(),
+                impact=int(points),
+            ))
+        elif points >= 4:
+            flags.append(SuitabilityFlag(
+                flag_type="positive",
+                category="health",
+                title=f"Fits your recent results — {label.lower()}",
+                description=(
+                    f"{', '.join(helpers) or 'This product'} per 100g."
+                ),
+                impact=int(points),
+            ))
+
+    adjustment = int(max(-_HEALTH_PENALTY_CAP, min(_HEALTH_BONUS_CAP, total)))
+
+    if worst <= -12:
+        level = "avoid"
+    elif adjustment < 0:
+        level = "watch"
+    else:
+        level = "none"
+
+    if flags:
+        # Said once, on every product where health context applied. A user
+        # acting on a score that came partly from their bloodwork needs to know
+        # the software is not a clinician.
+        flags.append(SuitabilityFlag(
+            flag_type="info",
+            category="health",
+            title="Based on results you uploaded",
+            description=(
+                "This reflects readings from your own documents compared against "
+                "general nutritional guidance. It is not medical advice and not a "
+                "diagnosis — check with your doctor or a dietitian before changing "
+                "your diet."
+            ),
+            impact=0,
+        ))
+
+    return flags, adjustment, level
+
+
+_HEALTH_NUTRIENT_LABELS = {
+    "energy_kcal": "calories",
+    "protein_g": "protein",
+    "total_fat_g": "total fat",
+    "saturated_fat_g": "saturated fat",
+    "trans_fat_g": "trans fat",
+    "cholesterol_mg": "cholesterol",
+    "total_carbohydrates_g": "carbs",
+    "total_sugars_g": "sugars",
+    "added_sugars_g": "added sugars",
+    "fiber_g": "fibre",
+    "sodium_mg": "sodium",
+    "potassium_mg": "potassium",
+    "iron_mg": "iron",
+    "vitamin_d_mcg": "vitamin D",
+    "vitamin_c_mg": "vitamin C",
+}
+
+
+# ──────────────────────────────────────────────
+# Disqualifying nutrient levels
+# ──────────────────────────────────────────────
+#
+# The quality score below is additive: each nutrient adds or subtracts points.
+# That reads fairly across the normal range and fails badly at the extremes,
+# because one catastrophic nutrient gets outvoted by several mild positives.
+#
+# Soy sauce is the clearest case. It carries 5,493mg of sodium per 100g —
+# nine times the "high" line — and scored 78/100 for nutritional quality and
+# 85/100 against a weight-loss goal, because the single -12 for sodium was
+# more than repaid by low sugar, low saturated fat and some protein. It came
+# out ahead of olive oil.
+#
+# So an extreme level caps the score instead of merely deducting from it. That
+# is the pattern the engine already uses for every other disqualifying
+# finding: an allergen conflict, an incompatible dietary pattern and a
+# violated strict preference all cap rather than subtract. This makes a
+# nutrient the same kind of finding.
+#
+# Only nutrients whose extremes are bad REGARDLESS of what the food is
+# qualify. Saturated fat is deliberately absent: 14g/100g is extreme for a
+# biscuit and unremarkable for olive oil, and capping on it would push olive
+# oil further down when it is already scored too harshly. Judging fat needs
+# category awareness, which is a separate piece of work.
+#
+# Limits are the UK FSA front-of-pack "red" thresholds, the same ones the
+# additive scoring below uses, so there is one set of numbers to defend.
+_EXTREME_NUTRIENTS = {
+    "sodium_mg": {"limit": 600.0, "label": "sodium", "unit": "mg"},
+    "total_sugars_g": {"limit": 22.5, "label": "sugar", "unit": "g"},
+    # No FSA red line — any industrial trans fat is undesirable, and this is
+    # the level at which it dominates everything else about a product.
+    "trans_fat_g": {"limit": 2.0, "label": "trans fat", "unit": "g"},
+}
+
+_SEVERE_MULTIPLE = 2.0    # twice the "high" line
+_EXTREME_MULTIPLE = 3.0   # three times it
+
+# What a food can still score on nutritional quality alone…
+_SEVERE_QUALITY_CAP = 40
+_EXTREME_QUALITY_CAP = 25
+# …and overall, once goals and ingredients are folded in. The overall cap is
+# the one that matters: a goal profile only looks at the nutrients it names,
+# so a weight-loss goal never sees sodium at all and rates soy sauce highly
+# however low its nutritional quality is.
+_SEVERE_OVERALL_CAP = 55
+_EXTREME_OVERALL_CAP = 35
+
+
+def _nutrient_extremes(
+    nutrition: Optional[dict],
+    category_profile: Optional[dict] = None,
+    portion_g: Optional[float] = None,
+) -> tuple[str, list[SuitabilityFlag], set[str]]:
+    """
+    Find nutrients present in disqualifying amounts.
+
+    Returns ("none" | "severe" | "extreme", flags, capped_keys). The level is
+    the worst single nutrient, not an average — the whole point is that one
+    bad enough nutrient decides the outcome on its own.
+
+    `capped_keys` lets the additive scoring below drop its own warning for the
+    same nutrient, so the user sees one finding about the sugar rather than
+    two differently-worded ones.
+    """
+    if not nutrition:
+        return "none", [], set()
+
+    flags: list[SuitabilityFlag] = []
+    capped: set[str] = set()
+    level = "none"
+
+    for key, spec in _EXTREME_NUTRIENTS.items():
+        value = nutrition.get(key)
+        if value is None or value <= 0:
+            continue
+
+        # A drink's sugar line is half a food's, so the same grams are twice as
+        # far past it. The scale comes from the category profile rather than
+        # being written in twice.
+        limit = spec["limit"] * _cat.threshold_scale(category_profile, key)
+        multiple = value / limit
+
+        share = _cat.portion_share(key, value, portion_g) if portion_g else None
+        if share is not None:
+            # Where we know roughly how much of this a person uses, judge what
+            # they actually get rather than the figure per 100g. That is what
+            # stops a spice being condemned on a quantity nobody consumes —
+            # and what keeps soy sauce condemned, because a tablespoon of it
+            # really does carry 41% of a day's sodium.
+            if share < _cat.PORTION_SEVERE_SHARE:
+                continue
+            is_extreme = share >= _cat.PORTION_EXTREME_SHARE
+        else:
+            if multiple < _SEVERE_MULTIPLE:
+                continue
+            is_extreme = multiple >= _EXTREME_MULTIPLE
+
+        capped.add(key)
+        if is_extreme:
+            level = "extreme"
+        elif level != "extreme":
+            level = "severe"
+
+        if share is not None:
+            amount = _cat.portion_amount(value, portion_g)
+            detail = (
+                f"A typical {_fmt(portion_g)}g serving carries "
+                f"{_fmt(amount)}{spec['unit']} of {spec['label']} — about "
+                f"{share * 100:.0f}% of an adult's daily reference."
+            )
+        else:
+            detail = (
+                f"{_fmt(value)}{spec['unit']} of {spec['label']} per 100g — "
+                f"{multiple:.1f}× the level considered high "
+                f"({_fmt(limit)}{spec['unit']})."
+            )
+
+        flags.append(SuitabilityFlag(
+            flag_type="danger" if is_extreme else "warning",
+            category="nutrition",
+            title=f"{'Extreme' if is_extreme else 'Very high'} {spec['label']}",
+            description=(
+                f"{detail} This limits the score on its own, whatever else "
+                f"the product contains."
+            ),
+            # Reported as 0 because this caps the score rather than deducting a
+            # fixed amount; claiming a point value here would not add up.
+            impact=0,
+        ))
+
+    return level, flags, capped
+
+
+# EU Nutrition Reference Values. A product is legally a "source of" a nutrient
+# when 100g supplies 15% of these, which is a real definition rather than a
+# number we chose.
+_NRV = {
+    "iron_mg": 14.0,
+    "calcium_mg": 800.0,
+    "vitamin_c_mg": 80.0,
+    "vitamin_d_mcg": 5.0,
+    "vitamin_a_mcg": 800.0,
+    "potassium_mg": 2000.0,
+}
+
+
+def _provides_nutrition(nutrition: Optional[dict]) -> Optional[bool]:
+    """
+    Whether this product actually supplies anything nutritionally.
+
+    True  — has protein, fibre or a meaningful vitamin or mineral.
+    False — supplies none of them.
+    None  — cannot tell, so the caller must not penalise it. This covers both
+            missing data and categories where protein and fibre carry no
+            meaning anyway (a cooking oil has neither by nature).
+    """
+    if not nutrition:
+        return None
+
+    protein = nutrition.get("protein_g")
+    fibre = nutrition.get("fiber_g")
+    if protein is None and fibre is None:
+        return None
+
+    if (protein or 0) >= 3.0 or (fibre or 0) >= 1.5:
+        return True
+
+    for key, nrv in _NRV.items():
+        value = nutrition.get(key)
+        if value is not None and value >= nrv * 0.15:
+            return True
+
+    return False
+
+
+def _calculate_nutritional_quality(
+    nutrition: Optional[dict],
+    category_profile: Optional[dict] = None,
+    portion_g: Optional[float] = None,
+) -> tuple[int, list[SuitabilityFlag], str]:
     """
     Calculate an overall nutritional quality score (0-100) independent of user goals.
     Based on general dietary guidelines.
 
     Uses an additive scoring system starting from a base of 60 (neutral-positive)
-    to avoid artificially capping scores for genuinely healthy products.
+    to avoid artificially capping scores for genuinely healthy products — then
+    applies a ceiling for any nutrient present in a disqualifying amount, which
+    additive scoring alone cannot express.
+
+    Returns (score, flags, extreme_level), where extreme_level is passed up so
+    the caller can cap the composite too. See _nutrient_extremes.
     """
     if not nutrition:
         return 50, [SuitabilityFlag(
@@ -1130,63 +1562,113 @@ def _calculate_nutritional_quality(nutrition: Optional[dict]) -> tuple[int, list
             title="Limited nutritional data",
             description="Nutritional information is incomplete for this product.",
             impact=0,
-        )]
+        )], "none"
 
     flags = []
     score = 60  # Start at a neutral-positive baseline
 
+    # ── Does this product actually give you anything? ──
+    # Of the bonuses below, 32 points are for what a product does NOT contain
+    # and only 24 for what it does. That asymmetry is free money for an empty
+    # product: a diet cola scored 92 — no sugar, no sodium, no saturated fat,
+    # nothing at all — while plain yoghurt scored 88, because yoghurt has 2.1g
+    # of saturated fat and so forfeited a bonus the cola kept by being water
+    # and sweetener.
+    #
+    # So credit for absence is earned, not given: a product that supplies no
+    # protein, no fibre and no meaningful micronutrient gets no points for
+    # lacking the bad things either. It sits at the neutral baseline, which is
+    # what "contributes nothing" should look like.
+    #
+    # `None` means we cannot tell — missing data, or a category where protein
+    # and fibre carry no meaning (an oil has neither by nature). Then the
+    # bonuses stand, because absence of evidence is not evidence of emptiness.
+    provides = _provides_nutrition(nutrition)
+    earns_absence_credit = provides is not False
+
+    # Worked out first so each section below can skip its own warning for a
+    # nutrient that already has a clearer one from the cap.
+    extreme_level, extreme_flags, capped = _nutrient_extremes(
+        nutrition, category_profile, portion_g
+    )
+
+    # Cut-offs a category rescales (a drink's sugar line is half a food's).
+    sugar_scale = _cat.threshold_scale(category_profile, "total_sugars_g")
+    sodium_scale = _cat.threshold_scale(category_profile, "sodium_mg")
+    # A category may replace the saturated-fat bands outright, because it is
+    # scoring a different quantity — percent of total fat, for an oil.
+    sat_bands = _cat.quality_bands(category_profile, "saturated_fat_g")
+    sat_unit = _cat.nutrient_unit(category_profile, "saturated_fat_g", "g")
+    sat_label = _cat.nutrient_label(
+        category_profile, "saturated_fat_g", "saturated fat")
+
     # ── Sugar Assessment ──
     sugar = nutrition.get("total_sugars_g")
     if sugar is not None:
-        if sugar > 22.5:
+        if sugar > 22.5 * sugar_scale:
             score -= 18
-            flags.append(SuitabilityFlag("warning", "nutrition", "Very high sugar",
-                f"Contains {_fmt(sugar)}g of sugar per 100g (high is >22.5g).", -18))
-        elif sugar > 15:
+            if "total_sugars_g" not in capped:
+                flags.append(SuitabilityFlag("warning", "nutrition", "Very high sugar",
+                    f"Contains {_fmt(sugar)}g of sugar per 100g "
+                    f"(high is >{_fmt(22.5 * sugar_scale)}g).", -18))
+        elif sugar > 15 * sugar_scale:
             score -= 10
             flags.append(SuitabilityFlag("warning", "nutrition", "High sugar",
                 f"Contains {_fmt(sugar)}g of sugar per 100g.", -10))
-        elif sugar > 11.25:
+        elif sugar > 11.25 * sugar_scale:
             score -= 5
             flags.append(SuitabilityFlag("info", "nutrition", "Moderate sugar",
                 f"Contains {_fmt(sugar)}g of sugar per 100g.", -5))
-        elif sugar <= 5:
-            score += 12
-            flags.append(SuitabilityFlag("positive", "nutrition", "Low sugar",
-                f"Only {_fmt(sugar)}g of sugar per 100g.", 12))
-        else:
+        elif sugar <= 5 * sugar_scale:
+            # Credit for absence, only for a product that supplies something.
+            if earns_absence_credit:
+                score += 12
+                flags.append(SuitabilityFlag("positive", "nutrition", "Low sugar",
+                    f"Only {_fmt(sugar)}g of sugar per 100g.", 12))
+        elif earns_absence_credit:
             score += 5  # Acceptable sugar level
 
     # ── Sodium Assessment ──
     sodium = nutrition.get("sodium_mg")
     if sodium is not None:
-        if sodium > 600:
+        if sodium > 600 * sodium_scale:
             score -= 12
-            flags.append(SuitabilityFlag("warning", "nutrition", "High sodium",
-                f"Contains {_fmt(sodium)}mg of sodium per 100g (high is >600mg).", -12))
-        elif sodium > 400:
+            if "sodium_mg" not in capped:
+                flags.append(SuitabilityFlag("warning", "nutrition", "High sodium",
+                    f"Contains {_fmt(sodium)}mg of sodium per 100g "
+                    f"(high is >{_fmt(600 * sodium_scale)}mg).", -12))
+        elif sodium > 400 * sodium_scale:
             score -= 5
-        elif sodium <= 200:
-            score += 10
-            flags.append(SuitabilityFlag("positive", "nutrition", "Low sodium",
-                f"Only {_fmt(sodium)}mg of sodium per 100g.", 10))
-        else:
+        elif sodium <= 200 * sodium_scale:
+            if earns_absence_credit:
+                score += 10
+                flags.append(SuitabilityFlag("positive", "nutrition", "Low sodium",
+                    f"Only {_fmt(sodium)}mg of sodium per 100g.", 10))
+        elif earns_absence_credit:
             score += 3  # Acceptable sodium level
 
     # ── Saturated Fat Assessment ──
     sat_fat = nutrition.get("saturated_fat_g")
     if sat_fat is not None:
-        if sat_fat > 5:
+        # An oil is judged on the share of its fat that is saturated, not on
+        # grams per 100g — every oil is nearly all fat, so the absolute figure
+        # separates nothing.
+        hi = sat_bands["high"] if sat_bands else 5
+        mid = sat_bands["mid"] if sat_bands else 3
+        low = sat_bands["low"] if sat_bands else 1.5
+        basis = "per 100g" if sat_unit == "g" else "of its fat"
+        if sat_fat > hi:
             score -= 10
             flags.append(SuitabilityFlag("warning", "nutrition", "High saturated fat",
-                f"Contains {_fmt(sat_fat)}g of saturated fat per 100g.", -10))
-        elif sat_fat > 3:
+                f"Contains {_fmt(sat_fat)}{sat_unit} {sat_label} {basis}.", -10))
+        elif sat_fat > mid:
             score -= 3
-        elif sat_fat <= 1.5:
-            score += 10
-            flags.append(SuitabilityFlag("positive", "nutrition", "Low saturated fat",
-                f"Only {_fmt(sat_fat)}g of saturated fat per 100g.", 10))
-        else:
+        elif sat_fat <= low:
+            if earns_absence_credit:
+                score += 10
+                flags.append(SuitabilityFlag("positive", "nutrition", "Low saturated fat",
+                    f"Only {_fmt(sat_fat)}{sat_unit} {sat_label} {basis}.", 10))
+        elif earns_absence_credit:
             score += 3  # Acceptable level
 
     # ── Protein Assessment ──
@@ -1217,9 +1699,32 @@ def _calculate_nutritional_quality(nutrition: Optional[dict]) -> tuple[int, list
         elif fiber >= 1:
             score += 3
 
-    # Clamp score
+    if provides is False:
+        flags.append(SuitabilityFlag(
+            flag_type="info",
+            category="nutrition",
+            title="Contributes little nutritionally",
+            description=(
+                "This supplies no protein, fibre, vitamins or minerals worth "
+                "counting, so it earns no credit for what it doesn't contain "
+                "either. Containing nothing is not the same as being good for "
+                "you."
+            ),
+            impact=0,
+        ))
+
+    # ── Disqualifying levels ──
+    # Applied as a ceiling rather than another deduction, so a nutrient far
+    # past the "high" line cannot be repaid by unrelated positives.
+    flags.extend(extreme_flags)
+
     score = max(0, min(100, score))
-    return score, flags
+    if extreme_level == "extreme":
+        score = min(score, _EXTREME_QUALITY_CAP)
+    elif extreme_level == "severe":
+        score = min(score, _SEVERE_QUALITY_CAP)
+
+    return score, flags, extreme_level
 
 
 # ── Ingredient quality signals ──
@@ -1359,6 +1864,9 @@ def calculate_suitability(
     custom_profiles: dict = None,
     inferred_allergen_matches: dict = None,
     dietary_pattern: Optional[str] = None,
+    health_conditions: list[dict] = None,
+    health_goal_conflicts: list[dict] = None,
+    product_category: Optional[str] = None,
 ) -> SuitabilityResult:
     """
     Main entry point: Calculate the Personal Suitability Score.
@@ -1372,6 +1880,27 @@ def calculate_suitability(
         user_preferences: List of dicts [{preference_type, is_hard_constraint}]
     """
     all_flags: list[SuitabilityFlag] = []
+
+    # ── Step 0: What kind of product is this? ──
+    # Resolved once and applied to every scorer, so goal alignment, the
+    # nutritional-quality index and the disqualifying-nutrient check all judge
+    # the product as the same kind of thing.
+    #
+    # `nutrition_view` is the product's nutrition as this category should be
+    # read: nutrients that carry no information for it become None (which every
+    # scorer already skips), and a nutrient with a better basis is replaced by
+    # it. The raw dict is kept for anything that quotes a figure back.
+    category_key = _cat.resolve_category(
+        product_category, product_ingredients, product_nutrition
+    )
+    category_profile = _cat.get_profile(category_key)
+    nutrition_view = _cat.apply_category_view(product_nutrition, category_profile)
+    # How much of this a person realistically uses at once, where we know. Our
+    # own per-category figure, never the label's declared serving — that one is
+    # set by the manufacturer and is the classic thing to shrink when the
+    # numbers look bad.
+    portion_g = _cat.reference_portion(category_key)
+    portion_negligible = _cat.is_negligible_portion(nutrition_view, portion_g)
 
     # ── Step 1: Allergen Check (Hard + Soft Constraints) ──
     _LEVEL_ORDER = {"none": 0, "preference": 1, "trace": 2, "confirmed": 3}
@@ -1459,9 +1988,10 @@ def calculate_suitability(
         for goal in user_goals:
             alignment = _evaluate_goal_alignment(
                 goal.get("goal_type", "general health"),
-                product_nutrition,
+                nutrition_view,
                 custom_profiles,
                 goal.get("status_message"),
+                category_profile,
             )
             goal_alignments.append(alignment)
             priority = goal.get("priority") or 0
@@ -1469,7 +1999,9 @@ def calculate_suitability(
     else:
         # Default to general health if no goals set
         goal_alignments.append(
-            _evaluate_goal_alignment("general health", product_nutrition, custom_profiles)
+            _evaluate_goal_alignment(
+                "general health", nutrition_view, custom_profiles, None, category_profile
+            )
         )
         goal_weights.append(1.0)
 
@@ -1501,8 +2033,19 @@ def calculate_suitability(
             impact=0,
         ))
 
+    if category_profile and category_profile.get("note"):
+        all_flags.append(SuitabilityFlag(
+            flag_type="info",
+            category="nutrition",
+            title=f"Scored as: {category_profile['label'].lower()}",
+            description=category_profile["note"],
+            impact=0,
+        ))
+
     # ── Step 3: Nutritional Quality Index ──
-    nutritional_quality_score, nutrition_flags = _calculate_nutritional_quality(product_nutrition)
+    nutritional_quality_score, nutrition_flags, nutrient_extreme_level = (
+        _calculate_nutritional_quality(nutrition_view, category_profile, portion_g)
+    )
     all_flags.extend(nutrition_flags)
 
     # ── Step 4: Ingredient Profile Score ──
@@ -1511,9 +2054,27 @@ def calculate_suitability(
 
     # ── Step 5: Nutrient preferences (soft constraints) ──
     preference_flags, preference_adjustment, preference_level = _evaluate_preferences(
-        user_preferences, product_nutrition
+        user_preferences, nutrition_view
     )
     all_flags.extend(preference_flags)
+
+    # ── Step 6: Health context from uploaded documents ──
+    health_flags, health_adjustment, health_level = _evaluate_health_context(
+        health_conditions or [], nutrition_view
+    )
+    all_flags.extend(health_flags)
+
+    # A goal that pulls against the user's own results is surfaced on the
+    # product too, not only on their profile — this is where they are actually
+    # making a decision, and the goal is part of what produced the score.
+    for conflict in (health_goal_conflicts or []):
+        all_flags.append(SuitabilityFlag(
+            flag_type="warning",
+            category="health",
+            title=f"Your “{conflict['goal_label']}” goal conflicts with your results",
+            description=conflict["description"],
+            impact=0,
+        ))
 
     # ── Composite Score ──
     # Goal alignment is the strongest signal (50%), nutritional quality supports
@@ -1553,10 +2114,10 @@ def calculate_suitability(
             ingredient_score * 0.25
         )
 
-    # Preferences adjust the assessment before any cap, so a product ruled out
-    # by an allergen or dietary pattern stays ruled out regardless of how many
-    # preferences it happens to satisfy.
-    base_overall = max(0, min(100, base_overall + preference_adjustment))
+    # Preferences and health context adjust the assessment before any cap, so
+    # a product ruled out by an allergen or dietary pattern stays ruled out
+    # regardless of how many preferences it happens to satisfy.
+    base_overall = max(0, min(100, base_overall + preference_adjustment + health_adjustment))
 
     if conflict_level == "confirmed":
         # Hard cap. A "mild" severity is slightly less punishing than
@@ -1584,6 +2145,48 @@ def calculate_suitability(
     # three stay distinguishable.
     if preference_level == "strict":
         overall = min(overall, _STRICT_PREFERENCE_CAP)
+
+    # A nutrient in a disqualifying amount caps the whole score, not just the
+    # nutritional-quality component. Capping only that component is not
+    # enough: it carries 30% of the composite, and a goal profile scores only
+    # the nutrients it names — a weight-loss goal never looks at sodium, so it
+    # rated soy sauce 85/100 no matter how low its nutritional quality went.
+    #
+    # Above the allergen and dietary ceilings: this says "this is a poor food",
+    # not "this is unsafe for you", and the two must stay distinguishable.
+    if nutrient_extreme_level == "extreme":
+        overall = min(overall, _EXTREME_OVERALL_CAP)
+    elif nutrient_extreme_level == "severe":
+        overall = min(overall, _SEVERE_OVERALL_CAP)
+
+    # A product whose realistic portion contributes almost nothing of anything
+    # cannot honestly be praised or condemned on nutrition. Half a teaspoon of
+    # cinnamon delivers hundredths of a percent of a day's sugar, salt and fat,
+    # and scoring it 93/100 read as a dietary endorsement of something that is
+    # neither good nor bad for you in the amount you use.
+    #
+    # Held near neutral rather than pushed down: it is not a bad product, it is
+    # a product this kind of score does not describe.
+    #
+    # A ceiling only, never a floor. An earlier version raised the score to a
+    # neutral minimum too, which would have lifted an allergen-capped 15 to 45
+    # — every cap above this line exists to hold a score DOWN, and nothing
+    # here may undo one. A negligible portion is a reason not to praise a
+    # product, never a reason to reassure someone about it.
+    if portion_negligible:
+        overall = min(overall, _cat.NEGLIGIBLE_SCORE_CEILING)
+        all_flags.append(SuitabilityFlag(
+            flag_type="info",
+            category="nutrition",
+            title="Used in small amounts",
+            description=(
+                f"A typical serving is about {_fmt(portion_g)}g, which "
+                "contributes very little of anything to your daily intake. "
+                "Its score is held near neutral because a number like this "
+                "does not really describe a seasoning."
+            ),
+            impact=0,
+        ))
 
     overall = max(0, min(100, overall))
 
@@ -1657,8 +2260,21 @@ def calculate_suitability(
             "diet_conflict": diet_level,
             # "none" | "soft" | "strict", and the net points preferences moved
             # the score by (already included in overall_score).
+            # "none" | "severe" | "extreme" — a nutrient present in a
+            # disqualifying amount, which caps the score outright.
+            "nutrient_extreme": nutrient_extreme_level,
+            # Which category profile shaped the scoring, or None for the
+            # ordinary path (an unknown or missing category).
+            "category": category_key,
+            # Grams of a realistic serving, where the category tells us. Null
+            # means the per-100g basis was used unchanged.
+            "reference_portion_g": portion_g,
             "preference_conflict": preference_level,
             "preference_adjustment": preference_adjustment,
+            # "none" | "watch" | "avoid", and the net points health context
+            # moved the score by (already included in overall_score).
+            "health_conflict": health_level,
+            "health_adjustment": health_adjustment,
             "unscored_goals": unscored_goals,
             "weights": applied_weights,
         }

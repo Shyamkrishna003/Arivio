@@ -34,3 +34,5 @@ pytesseract==0.3.10
 
 # Email validation
 email-validator
+# Health documents (lab reports)
+pypdf==5.1.0
