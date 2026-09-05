@@ -2,7 +2,7 @@
 User profile API routes.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
@@ -13,7 +13,8 @@ from app.users.models import (
     User, UserProfile, UserGoal, UserAllergy, UserPreference, UserScanHistory,
     PrivacySetting,
 )
-from app.products.models import SavedProduct
+from app.products.models import Product, SavedProduct
+from app.products.schemas import SavedProductList, SavedProductResponse
 from app.users.schemas import (
     ProfileUpdate, ProfileResponse, GoalCreate, GoalResponse,
     AllergyCreate, AllergyResponse, PreferenceCreate, PreferenceResponse,
@@ -398,6 +399,54 @@ async def get_dashboard(
         active_goals=active_goals,
         recent_activity=recent_activity
     )
+
+@router.get("/saved", response_model=SavedProductList)
+async def list_saved_products(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    The user's saved products, most recently saved first.
+
+    `total` is the unpaginated count, so the caller can page without inferring
+    the end from a short page — and it is the same number the dashboard's
+    Saved Products tile shows.
+    """
+    total = await db.execute(
+        select(func.count(SavedProduct.id)).where(SavedProduct.user_id == current_user.id)
+    )
+
+    rows = await db.execute(
+        select(Product, SavedProduct.saved_at)
+        .join(SavedProduct, SavedProduct.product_id == Product.id)
+        .where(SavedProduct.user_id == current_user.id)
+        .order_by(SavedProduct.saved_at.desc(), SavedProduct.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+
+    return SavedProductList(
+        items=[
+            SavedProductResponse(
+                id=product.id,
+                name=product.name,
+                brand=product.brand,
+                category=product.category,
+                country=product.country,
+                description=product.description,
+                image_url=product.image_url,
+                serving_size=product.serving_size,
+                verification_status=product.verification_status.value,
+                data_quality=product.data_quality.value,
+                saved_at=saved_at,
+            )
+            for product, saved_at in rows.all()
+        ],
+        total=total.scalar() or 0,
+    )
+
 
 @router.post("/history/{product_id}", status_code=status.HTTP_201_CREATED)
 async def add_to_history(

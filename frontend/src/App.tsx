@@ -17,6 +17,7 @@ import ProductSearch from './pages/product/ProductSearch';
 import ProductSubmit from './pages/product/ProductSubmit';
 import ProductDetail from './pages/product/ProductDetail';
 import Profile from './pages/profile/Profile';
+import SavedProducts from './pages/saved/SavedProducts';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -146,6 +147,14 @@ function AppRoutes() {
           element={
             <ProtectedRoute>
               <Profile />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/saved"
+          element={
+            <ProtectedRoute>
+              <SavedProducts />
             </ProtectedRoute>
           }
         />

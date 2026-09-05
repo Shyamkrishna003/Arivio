@@ -190,14 +190,26 @@ export default function HealthSection({ context, onChange }: Props) {
             and telling you when one of your goals pulls the other way.
           </p>
           <ul className="consent-terms">
-            <li><ShieldCheck size={15} /> <strong>The document is never stored.</strong> It's read
-              once, and only the numbers you confirm are kept.</li>
-            <li><ShieldCheck size={15} /> <strong>Encrypted and private to you.</strong> Health data
-              is never shared with the community, at any setting.</li>
-            <li><ShieldCheck size={15} /> <strong>Deleting means deleting.</strong> Withdraw consent
-              and everything is removed immediately.</li>
-            <li><AlertTriangle size={15} /> <strong>This is not medical advice.</strong> ARIVIO
-              doesn't diagnose. Talk to your doctor before changing your diet.</li>
+            <li>
+              <ShieldCheck size={15} />
+              <span><strong>The document is never stored.</strong> It's read once, and only the
+                numbers you confirm are kept.</span>
+            </li>
+            <li>
+              <ShieldCheck size={15} />
+              <span><strong>Encrypted and private to you.</strong> Health data is never shared
+                with the community, at any setting.</span>
+            </li>
+            <li>
+              <ShieldCheck size={15} />
+              <span><strong>Deleting means deleting.</strong> Withdraw consent and everything is
+                removed immediately.</span>
+            </li>
+            <li>
+              <AlertTriangle size={15} />
+              <span><strong>This is not medical advice.</strong> ARIVIO doesn't diagnose. Talk to
+                your doctor before changing your diet.</span>
+            </li>
           </ul>
           <p className="consent-note">
             Reading a document sends its contents to the AI provider configured
