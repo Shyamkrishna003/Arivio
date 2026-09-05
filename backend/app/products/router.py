@@ -2,65 +2,259 @@
 Product API routes.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
+from sqlalchemy import select
 from typing import Optional
 
 from app.db.session import get_db
 from app.core.security import get_current_user, get_optional_user
 from app.users.models import User
 from app.products.models import (
-    Product, ProductIdentifier, ProductIngredient,
+    Product, ProductIdentifier, ProductImage, ProductIngredient,
     NutritionFact, ProductAllergen, ProductClaim,
     VerificationStatus
 )
 from app.products.schemas import (
     ProductResponse, ProductDetailResponse, ProductSearchResult,
     ProductSubmit, NutritionResponse, IngredientBrief, AllergenResponse,
+    ProductMatchResponse, ProductSuggestion, ExternalCandidate,
+    ProductImportRequest, ProductImageResponse,
+)
+from app.ocr.storage import (
+    ImageRejected, ImageStorageUnavailable, store_image, stored_image_url,
+)
+from app.products.search import (
+    WEAK_MATCH_SCORE, best_score, find_probable_duplicates, normalize_query,
+    search_products as match_products, suggest_products,
 )
 
 router = APIRouter(prefix="/products", tags=["Products"])
 
 
+@router.get("/suggest", response_model=list[ProductSuggestion])
+async def suggest(
+    q: str = Query(..., min_length=1, max_length=200, description="Partial product name"),
+    limit: int = Query(8, ge=1, le=20),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Typeahead suggestions from the local catalogue.
+
+    Local only and never paginated: this runs while the user is still typing,
+    so it must not depend on an external API. Use /products/search for the full
+    result page, which does fall back to Open Food Facts.
+    """
+    matches = await suggest_products(db, q, limit=limit)
+    return [
+        ProductSuggestion(
+            id=m.product.id,
+            name=m.product.name,
+            brand=m.product.brand,
+            category=m.product.category,
+            image_url=m.product.image_url,
+            match_score=round(m.score, 4),
+        )
+        for m in matches
+    ]
+
+
 @router.get("/search", response_model=ProductSearchResult)
 async def search_products(
-    q: str = Query(..., min_length=1, description="Search query"),
+    q: str = Query(..., min_length=1, max_length=200, description="Search query"),
     category: Optional[str] = None,
     brand: Optional[str] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    include_external: bool = Query(
+        True, description="Fall back to Open Food Facts when local matches are weak"
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    """Search products by name, brand, or category."""
-    query = select(Product).where(
-        or_(
-            Product.name.ilike(f"%{q}%"),
-            Product.brand.ilike(f"%{q}%"),
-        )
+    """
+    Search products by name or brand, fuzzily.
+
+    Matching is trigram-based, so a partial, misspelled or reordered name still
+    finds the product — results come back ranked by how well they matched, for
+    the user to choose from, rather than filtered to a single answer.
+
+    When the local catalogue has nothing convincing, Open Food Facts is
+    searched as well. Those hits are returned as *candidates*: they are not
+    written to the database until the user picks one (see /products/import).
+    """
+    matches, total = await match_products(
+        db, q, category=category, brand=brand,
+        limit=page_size, offset=(page - 1) * page_size,
     )
 
-    if category:
-        query = query.where(Product.category == category)
-    if brand:
-        query = query.where(Product.brand.ilike(f"%{brand}%"))
+    products = [
+        ProductMatchResponse(
+            **ProductResponse.model_validate(m.product).model_dump(),
+            match_score=round(m.score, 4),
+        )
+        for m in matches
+    ]
 
-    # Count total
-    count_query = select(func.count()).select_from(query.subquery())
-    total_result = await db.execute(count_query)
-    total = total_result.scalar()
+    # Only widen the search when the local catalogue disappointed, and only on
+    # the first page — paging through local results should not re-run an
+    # external search that returns the same candidates every time.
+    #
+    # Skipped entirely when a category or brand filter is set: Open Food Facts
+    # is searched by name only, so its candidates would ignore the filter the
+    # user applied and appear to contradict it.
+    should_search_external = (
+        include_external
+        and page == 1
+        and not category
+        and not brand
+        and best_score(matches) < WEAK_MATCH_SCORE
+    )
 
-    # Paginate
-    query = query.offset((page - 1) * page_size).limit(page_size)
-    result = await db.execute(query)
-    products = result.scalars().all()
+    external: list[ExternalCandidate] = []
+    if should_search_external:
+        external = await _search_external(db, q)
 
     return ProductSearchResult(
-        products=[ProductResponse.model_validate(p) for p in products],
+        products=products,
         total=total,
         page=page,
         page_size=page_size,
+        external_candidates=external,
+        external_searched=should_search_external,
     )
+
+
+async def _search_external(db: AsyncSession, q: str) -> list[ExternalCandidate]:
+    """
+    Search Open Food Facts by name, cached, and drop anything already local.
+
+    Cached because the endpoint is slow and rate-limited, and because repeated
+    searches for the same term are the common case. Keyed on the normalized
+    query so casing and spacing variants share one entry.
+
+    Products we already hold are filtered out — offering to "import" a product
+    that is sitting in the results above it is confusing, and the import would
+    just return the existing row anyway.
+    """
+    from app.core.cache import get_json, set_json
+    from app.core.config import get_settings
+    from app.products.openfoodfacts import OFFClient
+    from app.products.ingest import OFF_SOURCE
+
+    settings = get_settings()
+    normalized = normalize_query(q).lower()
+    cache_key = f"off:search:{normalized}"
+
+    raw = await get_json(cache_key)
+    if raw is None:
+        client = OFFClient()
+        try:
+            raw = await client.search_by_name(normalized, limit=10)
+        finally:
+            await client.close()
+        # Cached even when empty: a term with no upstream results is exactly
+        # the one a user retries, and it costs a full round trip every time.
+        await set_json(cache_key, raw, settings.OPEN_FOOD_FACTS_SEARCH_CACHE_TTL)
+
+    codes = [c["code"] for c in raw if c.get("code")]
+    if not codes:
+        return []
+
+    # One query for both ways a candidate can already be local: by barcode, or
+    # by the external reference it was imported under.
+    known_ids = set((await db.execute(
+        select(ProductIdentifier.identifier_value)
+        .where(ProductIdentifier.identifier_value.in_(codes))
+    )).scalars().all())
+    known_ids.update((await db.execute(
+        select(Product.external_id)
+        .where(Product.external_source == OFF_SOURCE, Product.external_id.in_(codes))
+    )).scalars().all())
+
+    return [
+        ExternalCandidate(
+            source=OFF_SOURCE,
+            external_id=c["code"],
+            name=c["name"],
+            brand=c.get("brand"),
+            category=c.get("category"),
+            image_url=c.get("image_url"),
+        )
+        for c in raw
+        if c.get("code") and c["code"] not in known_ids
+    ]
+
+
+@router.post("/images", response_model=ProductImageResponse)
+async def upload_product_image(
+    file: UploadFile = File(..., description="Photo of the product or its label"),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Store a photo for a product that is about to be submitted.
+
+    Separate from /products/submit so that endpoint can stay JSON: the
+    duplicate guard answers 409 and the user resubmits with `force`, and
+    making them re-pick their photo for that second attempt would be poor.
+
+    Goes through the same pipeline as label scanning — decoded, EXIF stripped
+    (phone photos carry GPS), downscaled, re-encoded and named by content
+    hash. The returned id is what /products/submit accepts.
+
+    The image is not attached to anything yet. An id that is never submitted
+    leaves an unreferenced file; because storage is content-addressed, the
+    same photo uploaded twice is one file either way.
+    """
+    try:
+        raw = await file.read()
+        image = store_image(raw, file.content_type)
+    except ImageRejected as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
+        ) from e
+    except ImageStorageUnavailable as e:
+        print(f"⚠️ Product image could not be stored: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Image uploads are temporarily unavailable. Please try again shortly.",
+        ) from e
+
+    return ProductImageResponse(image_id=image.sha256, image_url=image.url_path)
+
+
+@router.post("/import", response_model=ProductResponse)
+async def import_product(
+    data: ProductImportRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Import an external search candidate into the catalogue.
+
+    This is the point at which an Open Food Facts hit becomes a real product:
+    search itself imports nothing. Idempotent — importing a product we already
+    hold returns the existing row rather than creating a duplicate.
+    """
+    from app.products.ingest import OFF_SOURCE, import_from_openfoodfacts
+
+    if data.source != OFF_SOURCE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown product source '{data.source}'.",
+        )
+
+    product = await import_from_openfoodfacts(db, data.external_id, background_tasks)
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="That product is no longer available from Open Food Facts.",
+        )
+
+    return ProductResponse.model_validate(product)
 
 
 @router.get("/{product_id}", response_model=ProductDetailResponse)
@@ -130,110 +324,29 @@ async def scan_barcode(
     inference cache in the background so the suitability request that follows
     doesn't pay the model latency.
     """
+    from app.products.ingest import import_from_openfoodfacts
+
     def _prime(product_id: int) -> None:
         if current_user is not None and background_tasks is not None:
             from app.allergens.tasks import prime_allergen_inference
             background_tasks.add_task(prime_allergen_inference, current_user.id, product_id)
-    # identifier_value has no unique constraint, and two routes can create a
-    # second row for the same barcode: a user submitting a product with a
-    # barcode we already hold, and two concurrent scans of an unknown barcode
-    # both importing it. Take the earliest match instead of asserting there is
-    # exactly one — scalar_one_or_none() would raise here and 500 every future
-    # scan of that barcode.
-    result = await db.execute(
-        select(ProductIdentifier)
-        .where(ProductIdentifier.identifier_value == barcode)
-        .order_by(ProductIdentifier.id)
-        .limit(1)
-    )
-    identifier = result.scalars().first()
 
-    if identifier:
-        product_result = await db.execute(
-            select(Product).where(Product.id == identifier.product_id)
+    # The local lookup and the Open Food Facts import both live in
+    # app.products.ingest, shared with /products/import: a product found by
+    # scanning and the same product found by name must end up as identical
+    # rows, and that only stays true if one piece of code creates both.
+    product = await import_from_openfoodfacts(db, barcode, background_tasks)
+
+    if not product:
+        raise HTTPException(
+            status_code=404,
+            detail="Product not found for this barcode. You can submit this product.",
         )
-        product = product_result.scalar_one_or_none()
-        if product:
-            _prime(product.id)
-            return ProductResponse.model_validate(product)
 
-    # Not found locally, check Open Food Facts
-    from app.products.openfoodfacts import OFFClient
-    from app.products.models import DataQuality, DataSourceTier
-    
-    off_client = OFFClient()
-    off_data = await off_client.get_product_by_barcode(barcode)
-    await off_client.close()
-    
-    if off_data:
-        # Create product from OFF data
-        product = Product(
-            name=off_data.get("name") or "Unknown Product",
-            brand=off_data.get("brand"),
-            category=off_data.get("category"),
-            image_url=off_data.get("image_url"),
-            serving_size=off_data.get("serving_size"),
-            verification_status=VerificationStatus.UNVERIFIED,
-            data_quality=DataQuality.MEDIUM,
-            data_source_tier=DataSourceTier.VERIFIED_DB,
-            external_source=off_data.get("external_source"),
-            external_id=off_data.get("external_id")
-        )
-        db.add(product)
-        await db.flush()
-        
-        identifier = ProductIdentifier(
-            product_id=product.id,
-            identifier_type="barcode",
-            identifier_value=barcode
-        )
-        db.add(identifier)
-        
-        # Add nutrition facts
-        if off_data.get("nutrition_facts"):
-            nutrition = NutritionFact(
-                product_id=product.id,
-                **off_data["nutrition_facts"]
-            )
-            db.add(nutrition)
-            
-        # Add ingredients
-        for ing_data in off_data.get("ingredients", []):
-            ing = ProductIngredient(
-                product_id=product.id,
-                name=ing_data["name"],
-                position=ing_data["position"],
-                percentage=ing_data["percentage"]
-            )
-            db.add(ing)
-            
-        # Add allergens
-        for allg_data in off_data.get("allergens", []):
-            allg = ProductAllergen(
-                product_id=product.id,
-                allergen=allg_data["allergen"],
-                certainty=allg_data["certainty"]
-            )
-            db.add(allg)
-            
-        await db.flush()
-        
-        # Dispatch AI background task for hidden allergen detection
-        if background_tasks:
-            from app.products.tasks import analyze_product_allergens_ai
-            ingredient_names = [ing_data["name"] for ing_data in off_data.get("ingredients", [])]
-            background_tasks.add_task(analyze_product_allergens_ai, product.id, ingredient_names)
-
-        # A freshly imported product needs the cache warmed just as much as one
-        # we already held — arguably more, since nothing has ever scored it.
-        _prime(product.id)
-
-        return ProductResponse.model_validate(product)
-
-    raise HTTPException(
-        status_code=404,
-        detail="Product not found for this barcode. You can submit this product.",
-    )
+    # A freshly imported product needs the cache warmed just as much as one we
+    # already held — arguably more, since nothing has ever scored it.
+    _prime(product.id)
+    return ProductResponse.model_validate(product)
 
 
 @router.post("/submit", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
@@ -259,6 +372,43 @@ async def submit_product(
                 detail=f"A product with this barcode already exists (id {existing_identifier.product_id}).",
             )
 
+    # Same guard the label-confirmation path applies: a submission with no
+    # barcode had nothing stopping it duplicating a product we already hold.
+    if not data.force:
+        duplicates = await find_probable_duplicates(db, data.name, data.brand)
+        if duplicates:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        "We already have a product with almost this name. Open it "
+                        "instead, or confirm this really is a different product."
+                    ),
+                    "matches": [
+                        {
+                            "id": m.product.id,
+                            "name": m.product.name,
+                            "brand": m.product.brand,
+                            "image_url": m.product.image_url,
+                            "match_score": round(m.score, 4),
+                        }
+                        for m in duplicates
+                    ],
+                },
+            )
+
+    # Resolve the photo before creating anything, so an image id that has
+    # expired or was never uploaded is reported rather than silently dropped
+    # after the product already exists.
+    image_url = None
+    if data.image_id:
+        image_url = stored_image_url(data.image_id)
+        if image_url is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="That image is no longer available. Please upload it again.",
+            )
+
     product = Product(
         name=data.name,
         brand=data.brand,
@@ -266,9 +416,23 @@ async def submit_product(
         description=data.description,
         verification_status=VerificationStatus.USER_SUBMITTED,
         external_source=f"user:{current_user.id}",
+        # Only a front-of-pack shot is used as the product's picture. A
+        # close-up of an ingredients panel is kept below but makes a poor
+        # thumbnail, and it is a likely thing to upload here.
+        image_url=image_url if data.image_type in ("front", "mixed") else None,
     )
     db.add(product)
     await db.flush()
+
+    if image_url:
+        # uploaded_by is recorded on every submitted image: these are shown to
+        # other users, so an abusive upload has to be traceable to an account.
+        db.add(ProductImage(
+            product_id=product.id,
+            image_type=data.image_type,
+            image_url=image_url,
+            uploaded_by=current_user.id,
+        ))
 
     # Add barcode if provided
     if data.barcode:

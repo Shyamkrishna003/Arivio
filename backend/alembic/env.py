@@ -23,6 +23,7 @@ from app.ingredients.models import *
 from app.community.models import *
 from app.ai.models import *
 from app.allergens.models import *
+from app.health.models import *
 
 config = context.config
 if config.config_file_name is not None:

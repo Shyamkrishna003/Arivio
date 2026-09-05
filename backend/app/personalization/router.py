@@ -15,12 +15,41 @@ from app.products.models import (
     Product, NutritionFact, ProductAllergen, ProductIngredient
 )
 from app.personalization.engine import (
-    calculate_suitability, _normalize, find_unresolved_allergens
+    calculate_suitability, _normalize, find_unresolved_allergens,
+    nutrition_row_to_dict,
 )
 from app.allergens.inference import resolve_allergens
 from app.personalization.schemas import SuitabilityResponse, AlternativeProduct, AlternativesResponse
 
 router = APIRouter(prefix="/personalization", tags=["Personalization"])
+
+
+async def load_health_context(db: AsyncSession, user_id: int) -> tuple[list, list]:
+    """
+    The user's confirmed health context, as (conditions, goal conflicts).
+
+    Imported lazily and wrapped: health context is an enhancement to a score,
+    so a health subsystem that is switched off (no encryption key) or failing
+    must degrade to "no health context" rather than take down suitability
+    scoring for everyone.
+    """
+    try:
+        from app.health.crypto import is_available
+        if not is_available():
+            return [], []
+
+        from app.health.profiles import resolve_conditions
+        from app.health.router import confirmed_markers_for_user, goal_conflicts_for_user
+
+        markers = await confirmed_markers_for_user(db, user_id)
+        if not markers:
+            return [], []
+        conditions = resolve_conditions(markers)
+        conflicts = await goal_conflicts_for_user(db, user_id, conditions)
+        return conditions, conflicts
+    except Exception as e:  # noqa: BLE001 — never fail a score over health context
+        print(f"⚠️ Could not load health context for user {user_id}: {e}")
+        return [], []
 
 
 @router.get("/suitability/{product_id}", response_model=SuitabilityResponse)
@@ -45,20 +74,7 @@ async def get_suitability(
     )
     nutrition_row = nutrition_result.scalar_one_or_none()
 
-    product_nutrition = None
-    if nutrition_row:
-        product_nutrition = {
-            "energy_kcal": nutrition_row.energy_kcal,
-            "protein_g": nutrition_row.protein_g,
-            "total_fat_g": nutrition_row.total_fat_g,
-            "saturated_fat_g": nutrition_row.saturated_fat_g,
-            "trans_fat_g": nutrition_row.trans_fat_g,
-            "total_carbohydrates_g": nutrition_row.total_carbohydrates_g,
-            "total_sugars_g": nutrition_row.total_sugars_g,
-            "fiber_g": nutrition_row.dietary_fiber_g,
-            "sodium_mg": nutrition_row.sodium_mg,
-            "cholesterol_mg": nutrition_row.cholesterol_mg,
-        }
+    product_nutrition = nutrition_row_to_dict(nutrition_row)
 
     # ── Load product allergens ──
     allergens_result = await db.execute(
@@ -152,6 +168,13 @@ async def get_suitability(
             product_allergens=product_allergens,
         )
 
+    # ── Health context from the user's own uploaded documents ──
+    # Only confirmed markers count (enforced inside the health module), and a
+    # user with none gets an empty list, so this path is a no-op for them.
+    health_conditions, health_goal_conflicts = await load_health_context(
+        db, current_user.id
+    )
+
     # ── Run the engine ──
     try:
         result = calculate_suitability(
@@ -164,6 +187,9 @@ async def get_suitability(
             custom_profiles=custom_profiles,
             inferred_allergen_matches=inferred_allergen_matches,
             dietary_pattern=dietary_pattern,
+            health_conditions=health_conditions,
+            health_goal_conflicts=health_goal_conflicts,
+            product_category=product.category,
         )
     except Exception as e:
         import traceback
@@ -274,20 +300,7 @@ async def get_alternatives(
         select(NutritionFact).where(NutritionFact.product_id == product_id)
     )
     orig_nutrition_row = orig_nutrition_result.scalar_one_or_none()
-    original_nutrition = None
-    if orig_nutrition_row:
-        original_nutrition = {
-            "energy_kcal": orig_nutrition_row.energy_kcal,
-            "protein_g": orig_nutrition_row.protein_g,
-            "total_fat_g": orig_nutrition_row.total_fat_g,
-            "saturated_fat_g": orig_nutrition_row.saturated_fat_g,
-            "trans_fat_g": orig_nutrition_row.trans_fat_g,
-            "total_carbohydrates_g": orig_nutrition_row.total_carbohydrates_g,
-            "total_sugars_g": orig_nutrition_row.total_sugars_g,
-            "fiber_g": orig_nutrition_row.dietary_fiber_g,
-            "sodium_mg": orig_nutrition_row.sodium_mg,
-            "cholesterol_mg": orig_nutrition_row.cholesterol_mg,
-        }
+    original_nutrition = nutrition_row_to_dict(orig_nutrition_row)
 
     orig_allergens_result = await db.execute(
         select(ProductAllergen).where(ProductAllergen.product_id == product_id)
@@ -334,6 +347,7 @@ async def get_alternatives(
             custom_profiles=custom_profiles,
             inferred_allergen_matches=orig_inferred,
             dietary_pattern=dietary_pattern,
+            product_category=original_product.category,
         )
         original_score = original_suitability.overall_score
     except Exception:
@@ -385,20 +399,7 @@ async def get_alternatives(
     for product in candidates:
         # Build product data
         n_row = nutrition_map.get(product.id)
-        product_nutrition = None
-        if n_row:
-            product_nutrition = {
-                "energy_kcal": n_row.energy_kcal,
-                "protein_g": n_row.protein_g,
-                "total_fat_g": n_row.total_fat_g,
-                "saturated_fat_g": n_row.saturated_fat_g,
-                "trans_fat_g": n_row.trans_fat_g,
-                "total_carbohydrates_g": n_row.total_carbohydrates_g,
-                "total_sugars_g": n_row.total_sugars_g,
-                "fiber_g": n_row.dietary_fiber_g,
-                "sodium_mg": n_row.sodium_mg,
-                "cholesterol_mg": n_row.cholesterol_mg,
-            }
+        product_nutrition = nutrition_row_to_dict(n_row)
         
         product_allergens = allergens_map.get(product.id, [])
         product_ingredients = ingredients_map.get(product.id, [])
@@ -435,6 +436,7 @@ async def get_alternatives(
                 custom_profiles=custom_profiles,
                 inferred_allergen_matches=inferred,
                 dietary_pattern=dietary_pattern,
+                product_category=product.category,
             )
         except Exception:
             continue

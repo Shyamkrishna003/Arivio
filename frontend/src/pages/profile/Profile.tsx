@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store';
-import { profileAPI } from '../../services/api';
+import { healthAPI, profileAPI } from '../../services/api';
+import HealthSection from '../../components/health/HealthSection';
+import type { HealthContext } from '../../components/health/HealthSection';
 import { Shield, Target, AlertTriangle, CheckCircle2, HeartPulse, Loader2, Lock, UserCircle } from 'lucide-react';
 import './Profile.css';
 
@@ -28,9 +30,22 @@ export default function Profile() {
     age_ranges: Opt[]; activity_levels: Opt[]; dietary_patterns: Opt[]; preferences: Opt[];
   } | null>(null);
   const [detailsSaved, setDetailsSaved] = useState('');
+  // Owned here rather than inside HealthSection because the Goals section
+  // needs the same conflicts — the two must never disagree about whether a
+  // goal pulls against the user's results.
+  const [health, setHealth] = useState<HealthContext | null>(null);
+
+  const fetchHealth = () => {
+    healthAPI.getContext()
+      .then((r) => setHealth(r.data))
+      // A health subsystem that is off or failing must not break the rest
+      // of the profile page.
+      .catch(() => setHealth(null));
+  };
 
   useEffect(() => {
     fetchProfile();
+    fetchHealth();
     // Canonical names for autocomplete — picking one of these gets full synonym
     // coverage, where free text may only match literally.
     profileAPI.knownAllergens()
@@ -254,6 +269,19 @@ export default function Profile() {
                 {goal.status_message && goal.profile_status !== 'ready' && (
                   <p className="goal-status-message">{goal.status_message}</p>
                 )}
+                {/* Shown against the goal itself, not only on a product page:
+                    this is where someone decides whether to keep the goal, and
+                    the conflict is a fact about the goal rather than about any
+                    one product. */}
+                {health?.goal_conflicts
+                  ?.filter((c) => c.goal_label.toLowerCase() === String(goal.goal_type).toLowerCase()
+                    || c.goal_label.toLowerCase().includes(String(goal.goal_type).toLowerCase()))
+                  .map((c, i) => (
+                    <div className="goal-conflict" key={i}>
+                      <AlertTriangle size={14} />
+                      <span>{c.description}</span>
+                    </div>
+                  ))}
               </div>
             ))}
             {(!profile?.goals || profile.goals.length === 0) && (
@@ -460,6 +488,8 @@ export default function Profile() {
             )}
           </div>
         </div>
+
+        <HealthSection context={health} onChange={fetchHealth} />
       </div>
     </div>
   );

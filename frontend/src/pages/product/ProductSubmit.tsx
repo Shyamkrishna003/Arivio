@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { productsAPI } from '../../services/api';
-import { PackagePlus, ArrowLeft, AlertCircle, Info } from 'lucide-react';
+import { productsAPI, resolveImageUrl } from '../../services/api';
+import { PackagePlus, ArrowLeft, AlertCircle, Info, ArrowRight, ImagePlus, Loader2, X } from 'lucide-react';
 import './ProductSubmit.css';
 
 export default function ProductSubmit() {
@@ -17,13 +17,52 @@ export default function ProductSubmit() {
   const [ingredientsText, setIngredientsText] = useState('');
 
   const [error, setError] = useState('');
+  // Near-identical products the server refused to duplicate. The user has to
+  // resolve this before the submission can go through.
+  const [duplicates, setDuplicates] = useState<Array<{
+    id: number; name: string; brand?: string; match_score: number;
+  }> | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // The photo is stored as soon as it's picked, so it survives a 409 from the
+  // duplicate guard and the user doesn't have to choose it twice.
+  const [imageId, setImageId] = useState<string | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [imageType, setImageType] = useState('front');
+  const [uploading, setUploading] = useState(false);
+
+  const handleImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setUploading(true);
+    setError('');
+    try {
+      const { data } = await productsAPI.uploadImage(file);
+      setImageId(data.image_id);
+      setImagePreview(resolveImageUrl(data.image_url) || null);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setError(
+        (typeof detail === 'string' ? detail : null) ||
+        'Could not upload that image. Try a JPEG, PNG or WebP photo.'
+      );
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const clearImage = () => {
+    setImageId(null);
+    setImagePreview(null);
+  };
+
+  const submit = async (force: boolean) => {
     if (!name.trim()) return;
 
     setError('');
+    setDuplicates(null);
     setSubmitting(true);
     try {
       const response = await productsAPI.submit({
@@ -32,13 +71,33 @@ export default function ProductSubmit() {
         barcode: barcode.trim() || undefined,
         category: category.trim() || undefined,
         ingredients_text: ingredientsText.trim() || undefined,
+        image_id: imageId,
+        image_type: imageType,
+        force,
       });
       navigate(`/products/${response.data.id}`);
     } catch (err: any) {
-      setError(err?.response?.data?.detail || 'Failed to submit this product. Please try again.');
+      const detail = err?.response?.data?.detail;
+      // The duplicate guard answers 409 with an object, not a string. Passing
+      // that straight to setError would hand React an object to render and
+      // crash the page.
+      if (err?.response?.status === 409 && detail?.matches) {
+        setDuplicates(detail.matches);
+        setError(detail.message);
+      } else {
+        setError(
+          (typeof detail === 'string' ? detail : null) ||
+          'Failed to submit this product. Please try again.'
+        );
+      }
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    submit(false);
   };
 
   return (
@@ -59,6 +118,30 @@ export default function ProductSubmit() {
         {error && (
           <div className="submit-error">
             <AlertCircle size={16} /> <span>{error}</span>
+          </div>
+        )}
+
+        {duplicates && duplicates.length > 0 && (
+          <div className="duplicate-block">
+            <p className="duplicate-lead">
+              Adding this again would split its reviews and scores across two
+              entries. Open the existing one if it's the same product.
+            </p>
+            {duplicates.map((d) => (
+              <Link to={`/products/${d.id}`} key={d.id} className="duplicate-row">
+                <span className="duplicate-name">
+                  {d.brand ? `${d.brand} — ` : ''}{d.name}
+                </span>
+                <span className="duplicate-score">
+                  {Math.round(d.match_score * 100)}%
+                </span>
+                <ArrowRight size={15} />
+              </Link>
+            ))}
+            <button type="button" className="btn btn-secondary"
+              disabled={submitting} onClick={() => submit(true)}>
+              {submitting ? 'Submitting…' : 'No — this is a different product, add it'}
+            </button>
           </div>
         )}
 
@@ -129,10 +212,46 @@ export default function ProductSubmit() {
           </p>
         </div>
 
+        <div className="input-group">
+          <label>Photo</label>
+          {imagePreview ? (
+            <div className="image-preview">
+              <img src={imagePreview} alt="The product photo you uploaded" />
+              <button type="button" className="image-remove" onClick={clearImage}
+                aria-label="Remove photo">
+                <X size={15} />
+              </button>
+            </div>
+          ) : (
+            <label className="image-dropzone">
+              <input type="file" accept="image/*" style={{ display: 'none' }}
+                disabled={uploading} onChange={handleImage} />
+              {uploading ? <Loader2 size={20} className="spin" /> : <ImagePlus size={20} />}
+              <span>{uploading ? 'Uploading…' : 'Add a photo of the pack or its label'}</span>
+            </label>
+          )}
+
+          {imagePreview && (
+            <select className="input mt-2" value={imageType}
+              onChange={(e) => setImageType(e.target.value)}>
+              <option value="front">Front of pack</option>
+              <option value="ingredients">Ingredients label</option>
+              <option value="nutrition">Nutrition label</option>
+            </select>
+          )}
+
+          <p className="field-hint">
+            <Info size={13} /> Optional. Only a front-of-pack photo is used as the
+            product's picture — a close-up of a label is kept with the product but
+            makes a poor thumbnail. Photos are visible to other users, and location
+            data is stripped before upload.
+          </p>
+        </div>
+
         <button
           type="submit"
           className="btn btn-primary w-full"
-          disabled={submitting || !name.trim()}
+          disabled={submitting || uploading || !name.trim()}
         >
           {submitting ? 'Submitting...' : 'Submit Product'}
         </button>

@@ -37,8 +37,24 @@ class SuitabilityBreakdown(BaseModel):
     diet_conflict: str = "none"
     # "none" | "soft" | "strict" — whether a nutrient preference was missed,
     # and the net points preferences moved the score by.
+    # "none" | "severe" | "extreme" — a nutrient present in a disqualifying
+    # amount (2x or 3x the level considered high). Caps the score outright
+    # rather than deducting, so several mild positives cannot outvote it.
+    nutrient_extreme: str = "none"
+    # Which category profile shaped the scoring ("beverages", "added_fats"),
+    # or null for the ordinary path. Present so the UI can explain why a
+    # product was judged on a different basis.
+    category: Optional[str] = None
+    # Grams of a realistic serving for that category, where one is known.
+    # Null means the product was judged on the per-100g basis unchanged.
+    reference_portion_g: Optional[float] = None
     preference_conflict: str = "none"
     preference_adjustment: int = 0
+    # "none" | "watch" | "avoid" — whether the product works against a marker
+    # from the user's uploaded health documents, and the net points it moved
+    # the score by. Absent for users with no confirmed health context.
+    health_conflict: str = "none"
+    health_adjustment: int = 0
     unscored_goals: list[str] = []
     weights: dict
 

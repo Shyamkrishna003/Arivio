@@ -8,7 +8,7 @@ user_allergies, user_health_context, privacy_settings
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, Float, Text,
-    ForeignKey, Enum as SAEnum, JSON, Index, text
+    ForeignKey, Enum as SAEnum, JSON, Index, UniqueConstraint, text
 )
 from sqlalchemy.orm import relationship
 from app.db.session import Base
@@ -87,10 +87,28 @@ class User(Base):
     community_reviews = relationship("CommunityReview", back_populates="user", cascade="all, delete-orphan")
     saved_products = relationship("SavedProduct", back_populates="user", cascade="all, delete-orphan")
     scan_history = relationship("UserScanHistory", back_populates="user", cascade="all, delete-orphan")
+    # Deleting the account deletes the health documents with it — "delete
+    # means delete" is the promise the consent screen makes.
+    health_documents = relationship(
+        "HealthDocument", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class UserScanHistory(Base):
     __tablename__ = "user_scan_history"
+    # History is "the last time this user looked at this product", so a pair
+    # can only appear once. Without the constraint, add_to_history's
+    # read-then-write raced with itself: React StrictMode double-invokes the
+    # effect that records a view, both requests saw no row, and both inserted —
+    # which is why the same product appeared twice in Recent Activity, and why
+    # test/remove_history_duplicates.py existed to mop it up by hand.
+    #
+    # The constraint is the fix rather than the cleanup script, because it also
+    # makes the endpoint's ON CONFLICT upsert possible: only the database can
+    # settle a race between two concurrent inserts.
+    __table_args__ = (
+        UniqueConstraint("user_id", "product_id", name="uq_scan_history_user_product"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
@@ -181,6 +199,18 @@ class PrivacySetting(Base):
     share_activity_level = Column(Boolean, default=False)
     share_goals = Column(Boolean, default=False)
     share_allergies = Column(Boolean, default=False)
+
+    # ── Health context ──
+    # Separate from the share_* flags above, because this one is not about
+    # sharing: it is the explicit consent PRD §10 requires before we may
+    # process health documents at all. Null means never given; clearing it
+    # withdraws consent.
+    #
+    # There is deliberately no `share_health_context`. Every other attribute
+    # here can be opted into for community matching; health context cannot be
+    # shared at any setting, because PRD §10 says it must never be exposed
+    # through community profiles. Not offering the switch is the enforcement.
+    health_context_consent_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

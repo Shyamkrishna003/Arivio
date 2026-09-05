@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store/index.ts';
-import { productsAPI, personalizationAPI, aiAPI, profileAPI } from '../../services/api';
+import { productsAPI, personalizationAPI, aiAPI, profileAPI, resolveImageUrl } from '../../services/api';
 import { 
   ArrowLeft, CheckCircle2, AlertTriangle, Shield, 
   Leaf, BarChart3, Target, XCircle, Info, TrendingUp, TrendingDown, Minus,
@@ -360,7 +360,7 @@ export default function ProductDetail() {
       <div className="product-header animate-fade-in-up">
         <div className="product-image-container">
           {product.image_url ? (
-            <img src={product.image_url} alt={product.name} className="product-image" />
+            <img src={resolveImageUrl(product.image_url)} alt={product.name} className="product-image" />
           ) : (
             <div className="product-image-placeholder">
               <Leaf size={48} />
@@ -610,7 +610,7 @@ export default function ProductDetail() {
                 <div className="alt-content">
                   <div className="alt-thumb">
                     {alt.product.image_url ? (
-                      <img src={alt.product.image_url} alt={alt.product.name} />
+                      <img src={resolveImageUrl(alt.product.image_url)} alt={alt.product.name} />
                     ) : (
                       <Leaf size={24} className="text-muted" />
                     )}
