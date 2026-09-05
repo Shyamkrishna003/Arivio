@@ -1,0 +1,192 @@
+/* ============================================
+   Saved Products
+   ============================================ */
+
+.saved-page {
+  padding-top: 100px;
+  padding-bottom: var(--space-16);
+  max-width: 1000px;
+}
+
+.saved-nav {
+  margin-bottom: var(--space-6);
+}
+
+.saved-header {
+  margin-bottom: var(--space-8);
+}
+
+.saved-header h1 {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-3xl);
+  margin-bottom: var(--space-2);
+}
+
+.saved-header p {
+  color: var(--color-text-secondary);
+  font-size: var(--text-lg);
+}
+
+.saved-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-6);
+  background: color-mix(in srgb, var(--color-accent-danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent-danger) 35%, transparent);
+  border-radius: var(--radius-md);
+  color: var(--color-accent-danger);
+  font-size: var(--text-sm);
+}
+
+.saved-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  gap: var(--space-4);
+}
+
+/* The card is a row rather than a link, because Remove sits inside it and a
+   button nested in a link swallows its own click on some browsers. */
+.saved-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  transition: all var(--transition-normal);
+}
+
+.saved-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--color-border-secondary);
+  box-shadow: var(--shadow-md);
+}
+
+.saved-card-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: 1;
+  min-width: 0;
+  text-decoration: none;
+  color: var(--color-text-primary);
+}
+
+.saved-card-img {
+  width: 80px;
+  height: 80px;
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+  border: 1px solid var(--color-border-primary);
+}
+
+.saved-card-img img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.saved-card-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.saved-card-name {
+  font-size: var(--text-base);
+  font-weight: 600;
+  margin-bottom: var(--space-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.saved-card-badges {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.saved-card-arrow {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.saved-remove {
+  flex-shrink: 0;
+}
+
+.saved-remove:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.saved-more {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--space-8);
+}
+
+@media (max-width: 640px) {
+  .saved-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* .loading-state, .empty-state, .spinner, .spin and .back-link are each
+   defined per page rather than in a shared stylesheet. Vite bundles every
+   imported CSS file into one sheet, so borrowing another page's copy would
+   happen to work — until that page's styles change or it stops being built.
+   These are scoped to .saved-page so this page stands on its own without
+   redefining the shared names globally. */
+.saved-page .back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+.saved-page .back-link:hover { color: var(--color-accent-primary); }
+
+.saved-page .loading-state,
+.saved-page .empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-12) var(--space-6);
+  text-align: center;
+  color: var(--color-text-secondary);
+}
+
+.saved-page .empty-state h3 { margin: 0; color: var(--color-text-primary); }
+.saved-page .empty-state p { margin: 0; max-width: 460px; }
+.saved-page .placeholder-icon { color: var(--color-text-muted); }
+
+.saved-page .spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--color-border-primary);
+  border-top-color: var(--color-accent-primary);
+  border-radius: var(--radius-full);
+  animation: saved-spin 0.8s linear infinite;
+}
+
+.saved-page .spin { animation: saved-spin 0.8s linear infinite; }
+
+@keyframes saved-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .saved-page .spinner,
+  .saved-page .spin {
+    animation-duration: 2.4s;
+  }
+}

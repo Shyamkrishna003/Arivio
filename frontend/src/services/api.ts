@@ -167,6 +167,13 @@ export const productsAPI = {
 
   getById: (id: number) => api.get(`/products/${id}`),
 
+  // Saving is a toggle and both calls are idempotent: saving something already
+  // saved, or unsaving something that is not saved, both succeed. That keeps a
+  // double click, or a second tab, from surfacing an error for a state the
+  // user already has.
+  save: (id: number) => api.post(`/products/${id}/save`),
+  unsave: (id: number) => api.delete(`/products/${id}/save`),
+
   scan: (barcode: string) => api.post('/products/scan', null, { params: { barcode } }),
 
   // Store a photo before submitting the product. Separate from submit() so
@@ -283,6 +290,8 @@ export const profileAPI = {
   removePreference: (id: number) => api.delete(`/profile/preferences/${id}`),
   getDashboard: () => api.get('/profile/dashboard'),
   recordHistory: (productId: number) => api.post(`/profile/history/${productId}`),
+  getSaved: (limit = 50, offset = 0) =>
+    api.get('/profile/saved', { params: { limit, offset } }),
   // Served by the API so the dropdowns cannot drift from what it validates.
   getOptions: () => api.get('/profile/options'),
   getPrivacy: () => api.get('/profile/privacy'),

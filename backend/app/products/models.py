@@ -251,6 +251,14 @@ class DataProvenance(Base):
 
 class SavedProduct(Base):
     __tablename__ = "saved_products"
+    # Saving is a toggle, not a log: a user has either saved a product or not,
+    # so a (user, product) pair can appear at most once. The constraint is what
+    # makes the save endpoint an ON CONFLICT upsert — the same race that put
+    # duplicates in Recent Activity applies here, since a double-clicked save
+    # button issues two requests that both see no row.
+    __table_args__ = (
+        UniqueConstraint("user_id", "product_id", name="uq_saved_product_user_product"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)

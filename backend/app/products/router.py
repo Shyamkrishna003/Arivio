@@ -7,22 +7,24 @@ from fastapi import (
     status,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from typing import Optional
+from datetime import datetime, timezone
 
 from app.db.session import get_db
 from app.core.security import get_current_user, get_optional_user
 from app.users.models import User
 from app.products.models import (
     Product, ProductIdentifier, ProductImage, ProductIngredient,
-    NutritionFact, ProductAllergen, ProductClaim,
+    NutritionFact, ProductAllergen, ProductClaim, SavedProduct,
     VerificationStatus
 )
 from app.products.schemas import (
     ProductResponse, ProductDetailResponse, ProductSearchResult,
     ProductSubmit, NutritionResponse, IngredientBrief, AllergenResponse,
     ProductMatchResponse, ProductSuggestion, ExternalCandidate,
-    ProductImportRequest, ProductImageResponse,
+    ProductImportRequest, ProductImageResponse, SavedProductResponse,
 )
 from app.ocr.storage import (
     ImageRejected, ImageStorageUnavailable, store_image, stored_image_url,
@@ -258,8 +260,18 @@ async def import_product(
 
 
 @router.get("/{product_id}", response_model=ProductDetailResponse)
-async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
-    """Get detailed product information."""
+async def get_product(
+    product_id: int,
+    current_user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get detailed product information.
+
+    Authentication is optional: the product itself is public, and a signed-in
+    caller additionally gets `is_saved` so the page can paint the save control
+    correctly without a second round trip.
+    """
     result = await db.execute(select(Product).where(Product.id == product_id))
     product = result.scalar_one_or_none()
 
@@ -292,6 +304,16 @@ async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
     )
     claims = claims_result.scalars().all()
 
+    is_saved = False
+    if current_user:
+        saved_result = await db.execute(
+            select(SavedProduct.id).where(
+                SavedProduct.user_id == current_user.id,
+                SavedProduct.product_id == product_id,
+            )
+        )
+        is_saved = saved_result.scalar_one_or_none() is not None
+
     return ProductDetailResponse(
         id=product.id,
         name=product.name,
@@ -307,6 +329,92 @@ async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
         ingredients=[IngredientBrief.model_validate(i) for i in ingredients],
         allergens=[AllergenResponse.model_validate(a) for a in allergens],
         claims=[c.claim for c in claims],
+        is_saved=is_saved,
+    )
+
+
+@router.post("/{product_id}/save", response_model=SavedProductResponse,
+             status_code=status.HTTP_201_CREATED)
+async def save_product(
+    product_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Save a product to the user's list.
+
+    Idempotent, and a single upsert rather than read-then-write: saving is a
+    toggle, so saving twice is not an error, and two concurrent requests — what
+    a double-clicked button actually sends — would both see no row and both
+    insert. Only the unique constraint this conflicts on can settle that.
+
+    `saved_at` is left alone on conflict: it records when the user first saved
+    the product, and re-saving something already saved is a no-op, not a
+    refresh.
+    """
+    exists = await db.execute(select(Product.id).where(Product.id == product_id))
+    if exists.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    stmt = (
+        pg_insert(SavedProduct)
+        .values(
+            user_id=current_user.id,
+            product_id=product_id,
+            saved_at=datetime.now(timezone.utc),
+        )
+        .on_conflict_do_nothing(constraint="uq_saved_product_user_product")
+    )
+    await db.execute(stmt)
+    await db.flush()
+
+    # Re-read rather than trusting the insert: on conflict it returned nothing,
+    # and the response has to carry the original saved_at either way.
+    saved = await db.execute(
+        select(SavedProduct.saved_at).where(
+            SavedProduct.user_id == current_user.id,
+            SavedProduct.product_id == product_id,
+        )
+    )
+    saved_at = saved.scalar_one_or_none()
+
+    product = (
+        await db.execute(select(Product).where(Product.id == product_id))
+    ).scalar_one()
+
+    return SavedProductResponse(
+        id=product.id,
+        name=product.name,
+        brand=product.brand,
+        category=product.category,
+        country=product.country,
+        description=product.description,
+        image_url=product.image_url,
+        serving_size=product.serving_size,
+        verification_status=product.verification_status.value,
+        data_quality=product.data_quality.value,
+        saved_at=saved_at,
+    )
+
+
+@router.delete("/{product_id}/save", status_code=status.HTTP_204_NO_CONTENT)
+async def unsave_product(
+    product_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Remove a product from the user's saved list.
+
+    Unsaving something that is not saved succeeds: the caller asked for it to
+    be absent, and it is. Returning 404 there would make an unsave that raced
+    with another tab look like a failure.
+    """
+    await db.execute(
+        delete(SavedProduct).where(
+            SavedProduct.user_id == current_user.id,
+            SavedProduct.product_id == product_id,
+        )
     )
 
 

@@ -40,17 +40,21 @@
   width: 100%;
 }
 
+/* Flex rather than grid: a two-column grid pushes any loose text node in the
+   item onto a second row inside the narrow icon column. */
 .consent-terms li {
-  display: grid;
-  grid-template-columns: 18px 1fr;
+  display: flex;
+  align-items: flex-start;
   gap: var(--space-2);
-  align-items: start;
   font-size: var(--text-sm);
   color: var(--color-text-secondary);
   line-height: 1.55;
 }
 
+.consent-terms li > span { flex: 1; min-width: 0; }
+
 .consent-terms svg {
+  flex-shrink: 0;
   color: var(--color-accent-primary);
   margin-top: 2px;
 }

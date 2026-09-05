@@ -68,6 +68,20 @@ class ProductDetailResponse(ProductResponse):
     ingredients: List[IngredientBrief] = []
     allergens: List[AllergenResponse] = []
     claims: List[str] = []
+    # Carried on the detail response so the page can render the save button in
+    # its correct state on first paint, rather than flicking from unsaved to
+    # saved once a second request lands. Always False for anonymous callers.
+    is_saved: bool = False
+
+
+class SavedProductResponse(ProductResponse):
+    """A saved product, with when the user saved it."""
+    saved_at: Optional[datetime] = None
+
+
+class SavedProductList(BaseModel):
+    items: List[SavedProductResponse]
+    total: int
 
 
 class ProductSubmit(BaseModel):

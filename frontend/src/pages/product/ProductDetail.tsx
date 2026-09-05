@@ -6,7 +6,8 @@ import { productsAPI, personalizationAPI, aiAPI, profileAPI, resolveImageUrl } f
 import { 
   ArrowLeft, CheckCircle2, AlertTriangle, Shield, 
   Leaf, BarChart3, Target, XCircle, Info, TrendingUp, TrendingDown, Minus,
-  Brain, Star, Sparkles, MessageSquare, ChevronDown, ChevronUp, Lightbulb, Ban
+  Brain, Star, Sparkles, MessageSquare, ChevronDown, ChevronUp, Lightbulb, Ban,
+  Bookmark, BookmarkCheck
 } from 'lucide-react';
 import CommunitySection from '../../components/community/CommunitySection';
 import './ProductDetail.css';
@@ -95,11 +96,42 @@ export default function ProductDetail() {
   const [alternativesLoading, setAlternativesLoading] = useState(false);
   const [alternativesFetched, setAlternativesFetched] = useState(false);
 
+  // Seeded from the product payload's is_saved so the button paints in the
+  // right state immediately, rather than flicking once a second call lands.
+  const [isSaved, setIsSaved] = useState(false);
+  const [savePending, setSavePending] = useState(false);
+  const [saveError, setSaveError] = useState('');
+
+  const toggleSave = async () => {
+    if (!product || savePending) return;
+
+    // Flip first and reconcile on failure: the button is a toggle the user
+    // expects to respond at once, and both calls are idempotent, so a retry
+    // after a revert cannot land the user in a state the server disagrees with.
+    const next = !isSaved;
+    setIsSaved(next);
+    setSavePending(true);
+    setSaveError('');
+    try {
+      if (next) {
+        await productsAPI.save(product.id);
+      } else {
+        await productsAPI.unsave(product.id);
+      }
+    } catch {
+      setIsSaved(!next);
+      setSaveError(next ? 'Could not save this product.' : 'Could not remove this product.');
+    } finally {
+      setSavePending(false);
+    }
+  };
+
   useEffect(() => {
     const fetchProduct = async () => {
       try {
         const response = await productsAPI.getById(Number(id));
         setProduct(response.data);
+        setIsSaved(Boolean(response.data.is_saved));
 
         // Record history if authenticated (we do it here after we know product exists,
         // but we actually need to wait for isAuthenticated to be true, so we can do it in another effect)
@@ -375,6 +407,22 @@ export default function ProductDetail() {
             {product.category && <span className="badge badge-primary">{product.category}</span>}
             <span className="badge badge-secondary">{product.serving_size || 'Serving size unknown'}</span>
           </div>
+
+          {isAuthenticated && (
+            <div className="product-save">
+              <button
+                type="button"
+                className={`btn btn-secondary save-toggle ${isSaved ? 'is-saved' : ''}`}
+                onClick={toggleSave}
+                disabled={savePending}
+                aria-pressed={isSaved}
+              >
+                {isSaved ? <BookmarkCheck size={16} /> : <Bookmark size={16} />}
+                {isSaved ? 'Saved' : 'Save product'}
+              </button>
+              {saveError && <span className="save-error">{saveError}</span>}
+            </div>
+          )}
         </div>
 
         {/* Suitability Score Card */}
@@ -590,6 +638,18 @@ export default function ProductDetail() {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Alternatives are fetched only for a middling-or-worse score, and the
+          request runs after suitability has already painted — without this the
+          section simply popped in with no sign it was coming. */}
+      {alternativesLoading && !alternativesFetched && (
+        <div className="alternatives-section card animate-fade-in-up stagger-1">
+          <div className="alternatives-loading">
+            <div className="spinner-sm"></div>
+            <span>Looking for better alternatives…</span>
+          </div>
         </div>
       )}
 
