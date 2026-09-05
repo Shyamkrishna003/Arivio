@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.gateway import settings, _parse_ai_response
+from app.ai.gateway import settings
 from app.allergens.models import AllergenInference
 from app.personalization.engine import _normalize
 
@@ -112,48 +112,52 @@ RULES:
 
 def resolve_model() -> str:
     """
-    The model this provider will actually use.
+    The model a fresh verdict would most likely come from — the head of the
+    chain — used when writing a cache row.
 
-    Resolved separately from the call because it is part of the cache key — we
-    need it before deciding whether a cached verdict applies.
+    Reads are NOT restricted to this one: with a provider chain, a verdict may
+    legitimately have come from any provider in it (see cached_models below).
     """
-    provider = settings.AI_PROVIDER.lower()
-    if provider in ("gemini", "google"):
-        return settings.AI_MODEL if settings.AI_MODEL.startswith("gemini") else "gemini-2.0-flash"
-    if provider == "groq":
-        from app.ai.gateway import KNOWN_GROQ_MODELS, GROQ_DEFAULT_MODEL
-        return settings.AI_MODEL if settings.AI_MODEL in KNOWN_GROQ_MODELS else GROQ_DEFAULT_MODEL
-    return settings.AI_MODEL
+    from app.ai.providers import resolve_chain, resolve_model as chain_model
+
+    chain = resolve_chain()
+    return chain_model(chain[0]) if chain else settings.AI_MODEL
+
+
+def cached_models() -> set[str]:
+    """
+    Models whose cached verdicts we are willing to reuse.
+
+    Every model currently in the chain, because any of them could have
+    answered. Restricting reads to the head of the chain would throw away a
+    perfectly good verdict from a fallback provider and pay for another call
+    to get the same answer — while a model NOT in the chain (an old default,
+    a provider since removed) is still correctly ignored.
+    """
+    from app.ai.providers import chain_models
+
+    return chain_models() | {resolve_model()}
 
 
 async def _call_model(prompt: str, model: str) -> dict:
-    """Run the prompt against the configured provider."""
-    from openai import AsyncOpenAI
+    """
+    Run the prompt through the provider chain.
 
-    provider = settings.AI_PROVIDER.lower()
-    if provider in ("gemini", "google"):
-        client = AsyncOpenAI(
-            api_key=settings.AI_API_KEY,
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        )
-    elif provider == "groq":
-        client = AsyncOpenAI(api_key=settings.AI_API_KEY, base_url="https://api.groq.com/openai/v1")
-    else:
-        client = AsyncOpenAI(api_key=settings.AI_API_KEY)
+    `model` is accepted for signature compatibility but the chain picks the
+    model per provider; the caller records whichever one answered.
+    """
+    from app.ai.providers import complete_json
 
-    response = await client.chat.completions.create(
-        model=model,
-        messages=[
+    result = await complete_json(
+        [
             {"role": "system", "content": "You are a food-safety analyst. You output JSON only."},
             {"role": "user", "content": prompt},
         ],
         # Low temperature: this is a factual label-reading task, not a creative one.
         temperature=0.1,
-        max_tokens=1200,
-        response_format={"type": "json_object"},
+        max_tokens=2000,
     )
-    raw = response.choices[0].message.content or "{}"
-    return _parse_ai_response(raw)
+    return result.data
 
 
 async def resolve_allergens(
@@ -188,6 +192,11 @@ async def resolve_allergens(
     # Scoped to everything that determines the verdict: the label it was read
     # from, the model that read it, and the prompt revision we asked with. Any
     # of those differing makes a cached row a miss rather than truth.
+    #
+    # "The model that read it" is now any model in the provider chain rather
+    # than one fixed model: a verdict may have come from whichever provider
+    # answered that day, and all of them are trusted enough to be in the chain.
+    # Rows from a model no longer in the chain are still ignored.
     fingerprint = ingredients_fingerprint(product_ingredients, product_allergens)
     model = resolve_model()
     cached_rows = (await db.execute(
@@ -195,7 +204,7 @@ async def resolve_allergens(
             AllergenInference.product_id == product_id,
             AllergenInference.allergen.in_(wanted),
             AllergenInference.ingredients_hash == fingerprint,
-            AllergenInference.model == model,
+            AllergenInference.model.in_(cached_models()),
             AllergenInference.prompt_version == PROMPT_VERSION,
         )
     )).scalars().all()

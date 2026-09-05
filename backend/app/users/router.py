@@ -2,19 +2,24 @@
 User profile API routes.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
 
 from app.db.session import get_db
 from app.core.security import get_current_user
-from app.users.models import User, UserProfile, UserGoal, UserAllergy, UserPreference, UserScanHistory
-from app.products.models import SavedProduct
+from app.users.models import (
+    User, UserProfile, UserGoal, UserAllergy, UserPreference, UserScanHistory,
+    PrivacySetting,
+)
+from app.products.models import Product, SavedProduct
+from app.products.schemas import SavedProductList, SavedProductResponse
 from app.users.schemas import (
     ProfileUpdate, ProfileResponse, GoalCreate, GoalResponse,
     AllergyCreate, AllergyResponse, PreferenceCreate, PreferenceResponse,
-    FullProfileResponse, DashboardResponse, RecentActivityItem
+    FullProfileResponse, DashboardResponse, RecentActivityItem,
+    PrivacyResponse, PrivacyUpdate,
 )
 from sqlalchemy import func
 from sqlalchemy.orm import joinedload
@@ -80,6 +85,33 @@ async def update_profile(
 
     await db.flush()
     return profile
+
+
+@router.get("/options")
+async def profile_options():
+    """
+    The values the profile fields accept.
+
+    Served rather than duplicated in the client so the dropdowns cannot drift
+    from what the API validates — and, in the case of age bands, from the
+    ordered scale community relevance compares them on.
+    """
+    from app.users.models import AGE_RANGES, ActivityLevel, DietaryPattern
+    from app.personalization.engine import PREFERENCE_PROFILES
+
+    def label(value: str) -> str:
+        return value.replace("_", " ").capitalize()
+
+    return {
+        "age_ranges": [{"value": v, "label": v.capitalize()} for v in AGE_RANGES],
+        "activity_levels": [{"value": e.value, "label": label(e.value)} for e in ActivityLevel],
+        "dietary_patterns": [{"value": e.value, "label": label(e.value)} for e in DietaryPattern],
+        "preferences": [
+            {"value": key, "label": profile["label"],
+             "nutrient": profile["nutrient"], "direction": profile["direction"]}
+            for key, profile in PREFERENCE_PROFILES.items()
+        ],
+    }
 
 
 @router.post("/goals", response_model=GoalResponse, status_code=status.HTTP_201_CREATED)
@@ -229,7 +261,21 @@ async def add_preference(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Add a dietary preference."""
+    """Add a nutrient preference."""
+    # One entry per nutrient: a repeat would be scored twice, doubling the
+    # nudge it applies. Re-adding updates the strictness instead.
+    existing = await db.execute(
+        select(UserPreference).where(
+            UserPreference.user_id == current_user.id,
+            UserPreference.preference_type == data.preference_type,
+        )
+    )
+    current = existing.scalar_one_or_none()
+    if current is not None:
+        current.is_hard_constraint = data.is_hard_constraint
+        await db.flush()
+        return current
+
     pref = UserPreference(user_id=current_user.id, **data.model_dump())
     db.add(pref)
     await db.flush()
@@ -252,6 +298,60 @@ async def remove_preference(
     if not pref:
         raise HTTPException(status_code=404, detail="Preference not found")
     await db.delete(pref)
+
+@router.get("/privacy", response_model=PrivacyResponse)
+async def get_privacy(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    What this account currently permits to be shared with a community review.
+
+    Everything is off unless explicitly enabled — sharing is opt-in, and the
+    row is created in that state at registration.
+    """
+    result = await db.execute(
+        select(PrivacySetting).where(PrivacySetting.user_id == current_user.id)
+    )
+    settings_row = result.scalar_one_or_none()
+    if not settings_row:
+        # An older account registered before privacy defaults existed. Create
+        # the row in its fully-private state rather than assuming consent.
+        settings_row = PrivacySetting(user_id=current_user.id)
+        db.add(settings_row)
+        await db.flush()
+    return settings_row
+
+
+@router.put("/privacy", response_model=PrivacyResponse)
+async def update_privacy(
+    data: PrivacyUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update anonymous context-sharing consent.
+
+    Consent is not retroactive in one direction only: withdrawing it stops
+    future sharing, and re-submitting an experience rebuilds its shared context
+    from the settings in force at that moment. Context already attached to past
+    reviews is removed when a review is resubmitted without consent — see
+    `create_review`.
+    """
+    result = await db.execute(
+        select(PrivacySetting).where(PrivacySetting.user_id == current_user.id)
+    )
+    settings_row = result.scalar_one_or_none()
+    if not settings_row:
+        settings_row = PrivacySetting(user_id=current_user.id)
+        db.add(settings_row)
+
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(settings_row, field, value)
+
+    await db.flush()
+    return settings_row
+
 
 @router.get("/dashboard", response_model=DashboardResponse)
 async def get_dashboard(
@@ -300,26 +400,90 @@ async def get_dashboard(
         recent_activity=recent_activity
     )
 
+@router.get("/saved", response_model=SavedProductList)
+async def list_saved_products(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    The user's saved products, most recently saved first.
+
+    `total` is the unpaginated count, so the caller can page without inferring
+    the end from a short page — and it is the same number the dashboard's
+    Saved Products tile shows.
+    """
+    total = await db.execute(
+        select(func.count(SavedProduct.id)).where(SavedProduct.user_id == current_user.id)
+    )
+
+    rows = await db.execute(
+        select(Product, SavedProduct.saved_at)
+        .join(SavedProduct, SavedProduct.product_id == Product.id)
+        .where(SavedProduct.user_id == current_user.id)
+        .order_by(SavedProduct.saved_at.desc(), SavedProduct.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+
+    return SavedProductList(
+        items=[
+            SavedProductResponse(
+                id=product.id,
+                name=product.name,
+                brand=product.brand,
+                category=product.category,
+                country=product.country,
+                description=product.description,
+                image_url=product.image_url,
+                serving_size=product.serving_size,
+                verification_status=product.verification_status.value,
+                data_quality=product.data_quality.value,
+                saved_at=saved_at,
+            )
+            for product, saved_at in rows.all()
+        ],
+        total=total.scalar() or 0,
+    )
+
+
 @router.post("/history/{product_id}", status_code=status.HTTP_201_CREATED)
 async def add_to_history(
     product_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Record that a user scanned or viewed a product, preventing duplicates."""
+    """
+    Record that a user scanned or viewed a product.
+
+    Written as a single upsert rather than read-then-write. The previous
+    version selected the row, then inserted if it was absent — and two
+    concurrent calls both saw it absent and both inserted, putting the product
+    in Recent Activity twice. That is not hypothetical: React StrictMode
+    double-invokes the effect that calls this, so it happened on essentially
+    every scan in development.
+
+    An application-level check cannot close that race whatever order it runs
+    in; only the database can, via the unique constraint this conflicts on.
+    """
     from datetime import datetime, timezone
 
-    result = await db.execute(
-        select(UserScanHistory)
-        .where(UserScanHistory.user_id == current_user.id, UserScanHistory.product_id == product_id)
-    )
-    existing = result.scalar_one_or_none()
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    if existing:
-        existing.scanned_at = datetime.now(timezone.utc)
-    else:
-        history = UserScanHistory(user_id=current_user.id, product_id=product_id)
-        db.add(history)
-        
+    stmt = (
+        pg_insert(UserScanHistory)
+        .values(
+            user_id=current_user.id,
+            product_id=product_id,
+            scanned_at=datetime.now(timezone.utc),
+        )
+        # Seeing a product again updates when, it does not add a second row.
+        .on_conflict_do_update(
+            constraint="uq_scan_history_user_product",
+            set_={"scanned_at": datetime.now(timezone.utc)},
+        )
+    )
+    await db.execute(stmt)
     await db.commit()
     return {"status": "success"}

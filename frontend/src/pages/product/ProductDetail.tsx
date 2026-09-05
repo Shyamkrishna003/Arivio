@@ -2,12 +2,14 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store/index.ts';
-import { productsAPI, personalizationAPI, aiAPI, profileAPI } from '../../services/api';
+import { productsAPI, personalizationAPI, aiAPI, profileAPI, resolveImageUrl } from '../../services/api';
 import { 
   ArrowLeft, CheckCircle2, AlertTriangle, Shield, 
   Leaf, BarChart3, Target, XCircle, Info, TrendingUp, TrendingDown, Minus,
-  Brain, Star, Sparkles, MessageSquare, ChevronDown, ChevronUp, Lightbulb
+  Brain, Star, Sparkles, MessageSquare, ChevronDown, ChevronUp, Lightbulb, Ban,
+  Bookmark, BookmarkCheck
 } from 'lucide-react';
+import CommunitySection from '../../components/community/CommunitySection';
 import './ProductDetail.css';
 
 interface SuitabilityData {
@@ -15,6 +17,8 @@ interface SuitabilityData {
   verdict: string;
   confidence: number;
   allergen_safe: boolean;
+  // False when the product contains something the user's dietary pattern excludes.
+  diet_compatible?: boolean;
   flags: Array<{
     flag_type: string;
     category: string;
@@ -39,6 +43,9 @@ interface SuitabilityData {
     nutritional_quality: number;
     ingredient_profile: number;
     allergen_conflict?: 'none' | 'preference' | 'trace' | 'confirmed';
+    diet_conflict?: 'none' | 'uncertain' | 'incompatible';
+    preference_conflict?: 'none' | 'soft' | 'strict';
+    preference_adjustment?: number;
     unscored_goals?: string[];
     weights?: Record<string, number>;
   };
@@ -89,11 +96,42 @@ export default function ProductDetail() {
   const [alternativesLoading, setAlternativesLoading] = useState(false);
   const [alternativesFetched, setAlternativesFetched] = useState(false);
 
+  // Seeded from the product payload's is_saved so the button paints in the
+  // right state immediately, rather than flicking once a second call lands.
+  const [isSaved, setIsSaved] = useState(false);
+  const [savePending, setSavePending] = useState(false);
+  const [saveError, setSaveError] = useState('');
+
+  const toggleSave = async () => {
+    if (!product || savePending) return;
+
+    // Flip first and reconcile on failure: the button is a toggle the user
+    // expects to respond at once, and both calls are idempotent, so a retry
+    // after a revert cannot land the user in a state the server disagrees with.
+    const next = !isSaved;
+    setIsSaved(next);
+    setSavePending(true);
+    setSaveError('');
+    try {
+      if (next) {
+        await productsAPI.save(product.id);
+      } else {
+        await productsAPI.unsave(product.id);
+      }
+    } catch {
+      setIsSaved(!next);
+      setSaveError(next ? 'Could not save this product.' : 'Could not remove this product.');
+    } finally {
+      setSavePending(false);
+    }
+  };
+
   useEffect(() => {
     const fetchProduct = async () => {
       try {
         const response = await productsAPI.getById(Number(id));
         setProduct(response.data);
+        setIsSaved(Boolean(response.data.is_saved));
 
         // Record history if authenticated (we do it here after we know product exists,
         // but we actually need to wait for isAuthenticated to be true, so we can do it in another effect)
@@ -354,7 +392,7 @@ export default function ProductDetail() {
       <div className="product-header animate-fade-in-up">
         <div className="product-image-container">
           {product.image_url ? (
-            <img src={product.image_url} alt={product.name} className="product-image" />
+            <img src={resolveImageUrl(product.image_url)} alt={product.name} className="product-image" />
           ) : (
             <div className="product-image-placeholder">
               <Leaf size={48} />
@@ -369,6 +407,22 @@ export default function ProductDetail() {
             {product.category && <span className="badge badge-primary">{product.category}</span>}
             <span className="badge badge-secondary">{product.serving_size || 'Serving size unknown'}</span>
           </div>
+
+          {isAuthenticated && (
+            <div className="product-save">
+              <button
+                type="button"
+                className={`btn btn-secondary save-toggle ${isSaved ? 'is-saved' : ''}`}
+                onClick={toggleSave}
+                disabled={savePending}
+                aria-pressed={isSaved}
+              >
+                {isSaved ? <BookmarkCheck size={16} /> : <Bookmark size={16} />}
+                {isSaved ? 'Saved' : 'Save product'}
+              </button>
+              {saveError && <span className="save-error">{saveError}</span>}
+            </div>
+          )}
         </div>
 
         {/* Suitability Score Card */}
@@ -407,6 +461,18 @@ export default function ProductDetail() {
                 {!suitability.allergen_safe && (
                   <div className="allergen-warning-banner">
                     <XCircle size={16} /> Allergen conflict detected
+                  </div>
+                )}
+                {/* A compatibility issue is shown as its own banner rather than
+                    left to be inferred from the number. */}
+                {suitability.diet_compatible === false && (
+                  <div className="allergen-warning-banner diet-warning-banner">
+                    <Ban size={16} /> Excluded by your dietary pattern
+                  </div>
+                )}
+                {suitability.breakdown?.diet_conflict === 'uncertain' && (
+                  <div className="diet-uncertain-banner">
+                    <Info size={14} /> Contains an ingredient that may be animal-derived
                   </div>
                 )}
               </div>
@@ -575,6 +641,18 @@ export default function ProductDetail() {
         </div>
       )}
 
+      {/* Alternatives are fetched only for a middling-or-worse score, and the
+          request runs after suitability has already painted — without this the
+          section simply popped in with no sign it was coming. */}
+      {alternativesLoading && !alternativesFetched && (
+        <div className="alternatives-section card animate-fade-in-up stagger-1">
+          <div className="alternatives-loading">
+            <div className="spinner-sm"></div>
+            <span>Looking for better alternatives…</span>
+          </div>
+        </div>
+      )}
+
       {/* Highly Suitable Alternatives Section */}
       {alternativesFetched && alternatives.length > 0 && (
         <div className="alternatives-section card animate-fade-in-up stagger-1">
@@ -592,7 +670,7 @@ export default function ProductDetail() {
                 <div className="alt-content">
                   <div className="alt-thumb">
                     {alt.product.image_url ? (
-                      <img src={alt.product.image_url} alt={alt.product.name} />
+                      <img src={resolveImageUrl(alt.product.image_url)} alt={alt.product.name} />
                     ) : (
                       <Leaf size={24} className="text-muted" />
                     )}
@@ -828,6 +906,12 @@ export default function ProductDetail() {
         </div>
 
       </div>
+
+      {/* Real-world experiences, kept separate from the analysis above: the
+          score is derived from the label, this is what people reported. */}
+      {product && (
+        <CommunitySection productId={product.id} isAuthenticated={isAuthenticated} />
+      )}
     </div>
   );
 }

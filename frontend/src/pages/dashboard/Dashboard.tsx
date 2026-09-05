@@ -1,4 +1,5 @@
-import { useEffect, useState, FormEvent } from 'react';
+import { useEffect, useState } from 'react';
+import type { FormEvent } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import type { RootState } from '../../store';
@@ -6,7 +7,7 @@ import { setUser } from '../../store/slices/authSlice';
 import { authAPI, profileAPI } from '../../services/api';
 import {
   ScanLine, Search, TrendingUp, Package, Shield,
-  ArrowRight, Sparkles, Activity, BarChart3, Clock, Image as ImageIcon
+  ArrowRight, Sparkles, Activity, Clock, Image as ImageIcon
 } from 'lucide-react';
 import './Dashboard.css';
 
@@ -141,7 +142,9 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="stat-card">
+          {/* The only stat that leads anywhere: the others are counters, this
+              one is the door to the list it counts. */}
+          <Link to="/saved" className="stat-card stat-card--link">
             <div className="stat-card-icon">
               <Package size={20} />
             </div>
@@ -149,7 +152,7 @@ export default function Dashboard() {
               <span className="stat-card-value">{loading ? '...' : (stats?.saved_products || 0)}</span>
               <span className="stat-card-label">Saved Products</span>
             </div>
-          </div>
+          </Link>
 
           <div className="stat-card">
             <div className="stat-card-icon">

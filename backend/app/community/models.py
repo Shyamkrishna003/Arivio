@@ -1,13 +1,13 @@
 """
 Community database models.
 
-Covers: community_reviews, review_context, review_experiences
+Covers: community_reviews, review_contexts, review_votes, review_flags
 """
 
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, Text,
-    ForeignKey, Enum as SAEnum, JSON
+    ForeignKey, Enum as SAEnum, JSON, UniqueConstraint
 )
 from sqlalchemy.orm import relationship
 from app.db.session import Base
@@ -36,6 +36,12 @@ class ExperienceType(str, enum.Enum):
 
 class CommunityReview(Base):
     __tablename__ = "community_reviews"
+    # One experience per user per product. Duplicate submissions are the
+    # simplest form of the manipulation the PRD asks us to prevent, and a
+    # repeated voice would also skew the aggregate percentages.
+    __table_args__ = (
+        UniqueConstraint("user_id", "product_id", name="uq_community_review_user_product"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
@@ -63,6 +69,8 @@ class CommunityReview(Base):
     user = relationship("User", back_populates="community_reviews")
     product = relationship("Product", back_populates="community_reviews")
     anonymous_context = relationship("ReviewContext", back_populates="review", uselist=False, cascade="all, delete-orphan")
+    votes = relationship("ReviewVote", back_populates="review", cascade="all, delete-orphan")
+    flags = relationship("ReviewFlag", back_populates="review", cascade="all, delete-orphan")
 
 
 class ReviewContext(Base):
@@ -79,3 +87,48 @@ class ReviewContext(Base):
     usage_duration = Column(String(50), nullable=True)
 
     review = relationship("CommunityReview", back_populates="anonymous_context")
+
+
+class ReviewVote(Base):
+    """
+    A helpful / not-helpful vote on a review.
+
+    Stored per user rather than as a bare counter: the counters on
+    CommunityReview can be incremented without limit, which is exactly the
+    vote-stuffing the manipulation-prevention requirement calls out. A row per
+    voter makes a second vote an update rather than another increment.
+    """
+    __tablename__ = "review_votes"
+    __table_args__ = (
+        UniqueConstraint("user_id", "review_id", name="uq_review_vote_user_review"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    review_id = Column(Integer, ForeignKey("community_reviews.id", ondelete="CASCADE"), nullable=False)
+    is_helpful = Column(Boolean, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    review = relationship("CommunityReview", back_populates="votes")
+
+
+class ReviewFlag(Base):
+    """
+    An abuse report raised by a reader against a review.
+
+    Reports accumulate rather than acting immediately — one reader disagreeing
+    with an experience is not grounds to remove it. Reaching the threshold
+    withdraws the review from public aggregation pending moderation.
+    """
+    __tablename__ = "review_flags"
+    __table_args__ = (
+        UniqueConstraint("user_id", "review_id", name="uq_review_flag_user_review"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    review_id = Column(Integer, ForeignKey("community_reviews.id", ondelete="CASCADE"), nullable=False)
+    reason = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    review = relationship("CommunityReview", back_populates="flags")

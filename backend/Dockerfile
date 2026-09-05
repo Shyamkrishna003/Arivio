@@ -11,11 +11,14 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# curl is used by the compose healthcheck. No tesseract: OCR is configured in
-# settings but not yet wired into any code path, so the binary would be dead
-# weight — add `tesseract-ocr` here when OCR is implemented.
+# curl is used by the compose healthcheck.
+#
+# tesseract-ocr is the local fallback for label reading: OCR_PROVIDER=auto
+# resolves to it whenever no AI key is configured, so without the binary a
+# deployment with no key would have a scan button that always fails. The
+# vision-model path does not use it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 # Copied first so the dependency layer is cached across source edits.

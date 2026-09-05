@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.db.session import AsyncSessionLocal
 from app.products.models import ProductAllergen
-from app.ai.gateway import settings, _parse_ai_response
+from app.ai.gateway import settings
 import traceback
 
 async def analyze_product_allergens_ai(product_id: int, ingredients: list[str]):
@@ -33,37 +33,17 @@ async def analyze_product_allergens_ai(product_id: int, ingredients: list[str]):
     """
     
     try:
-        from openai import AsyncOpenAI
-        
-        if settings.AI_PROVIDER.lower() in ("gemini", "google"):
-            client = AsyncOpenAI(
-                api_key=settings.AI_API_KEY,
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-            )
-            model = settings.AI_MODEL if settings.AI_MODEL.startswith("gemini") else "gemini-2.0-flash"
-        elif settings.AI_PROVIDER.lower() == "groq":
-            client = AsyncOpenAI(
-                api_key=settings.AI_API_KEY,
-                base_url="https://api.groq.com/openai/v1"
-            )
-            model = settings.AI_MODEL if "gpt" in settings.AI_MODEL or "compound" in settings.AI_MODEL or "qwen" in settings.AI_MODEL else "openai/gpt-oss-20b"
-        else:
-            client = AsyncOpenAI(api_key=settings.AI_API_KEY)
-            model = settings.AI_MODEL
-            
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
+        from app.ai.providers import complete_json
+
+        result = await complete_json(
+            [
                 {"role": "system", "content": "You output JSON only."},
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": prompt},
             ],
             temperature=0.2,
-            max_tokens=1000,
-            response_format={"type": "json_object"},
+            max_tokens=2000,
         )
-        
-        raw = response.choices[0].message.content or "{}"
-        data = _parse_ai_response(raw)
+        data = result.data
         found_allergens = data.get("found_allergens", [])
         
         if found_allergens:

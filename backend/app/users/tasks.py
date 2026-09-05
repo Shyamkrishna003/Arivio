@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from app.db.session import AsyncSessionLocal
 from app.users.models import CustomGoalProfile, UserGoal, GoalProfileStatus
-from app.ai.gateway import settings, _parse_ai_response
+from app.ai.gateway import settings
 from app.personalization.engine import GOAL_PROFILES, _normalize, _resolve_goal_key
 import traceback
 
@@ -117,37 +117,17 @@ async def generate_custom_goal_profile_ai(goal_type: str):
             - Provide a 'weights' mapping for all included nutrients. Give primary macronutrients for the goal a higher weight (e.g., 2.0 or 3.0) and secondary nutrients a lower weight (e.g., 1.0).
             """
             
-            from openai import AsyncOpenAI
-            
-            if settings.AI_PROVIDER.lower() in ("gemini", "google"):
-                client = AsyncOpenAI(
-                    api_key=settings.AI_API_KEY,
-                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-                )
-                model = settings.AI_MODEL if settings.AI_MODEL.startswith("gemini") else "gemini-2.0-flash"
-            elif settings.AI_PROVIDER.lower() == "groq":
-                client = AsyncOpenAI(
-                    api_key=settings.AI_API_KEY,
-                    base_url="https://api.groq.com/openai/v1"
-                )
-                model = settings.AI_MODEL if "gpt" in settings.AI_MODEL or "compound" in settings.AI_MODEL or "qwen" in settings.AI_MODEL else "openai/gpt-oss-20b"
-            else:
-                client = AsyncOpenAI(api_key=settings.AI_API_KEY)
-                model = settings.AI_MODEL
-                
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[
+            from app.ai.providers import complete_json
+
+            result = await complete_json(
+                [
                     {"role": "system", "content": "You output JSON only."},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
-                max_tokens=1000,
-                response_format={"type": "json_object"},
+                max_tokens=2000,
             )
-            
-            raw = response.choices[0].message.content or "{}"
-            data = _parse_ai_response(raw)
+            data = result.data
 
             # ── Sanity gate ──
             # The model may decline to profile an incoherent, unscoreable, or

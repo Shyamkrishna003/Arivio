@@ -323,6 +323,23 @@
   box-shadow: var(--shadow-md);
 }
 
+/* The tiles share a look, so the one that navigates has to say so on hover —
+   otherwise it is indistinguishable from the three that do nothing. */
+.stat-card--link {
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.stat-card--link:hover {
+  border-color: color-mix(in srgb, var(--color-accent-primary) 45%, transparent);
+}
+
+.stat-card--link:hover .stat-card-icon {
+  background: color-mix(in srgb, var(--color-accent-primary) 14%, transparent);
+  color: var(--color-accent-primary);
+}
+
 .stat-card-icon {
   width: 40px;
   height: 40px;

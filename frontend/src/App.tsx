@@ -12,10 +12,12 @@ import Login from './pages/auth/Login';
 import Register from './pages/auth/Register';
 import Dashboard from './pages/dashboard/Dashboard';
 import Scan from './pages/scan/Scan';
+import LabelConfirm from './pages/scan/LabelConfirm';
 import ProductSearch from './pages/product/ProductSearch';
 import ProductSubmit from './pages/product/ProductSubmit';
 import ProductDetail from './pages/product/ProductDetail';
 import Profile from './pages/profile/Profile';
+import SavedProducts from './pages/saved/SavedProducts';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -103,6 +105,16 @@ function AppRoutes() {
             </ProtectedRoute>
           }
         />
+        {/* Where a photographed label is corrected before anything is
+            analyzed (PRD §14). Keyed by extraction id so a reload survives. */}
+        <Route
+          path="/scan/confirm/:extractionId"
+          element={
+            <ProtectedRoute>
+              <LabelConfirm />
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="/products"
           element={
@@ -135,6 +147,14 @@ function AppRoutes() {
           element={
             <ProtectedRoute>
               <Profile />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/saved"
+          element={
+            <ProtectedRoute>
+              <SavedProducts />
             </ProtectedRoute>
           }
         />
