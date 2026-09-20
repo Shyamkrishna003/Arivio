@@ -191,11 +191,18 @@ async def get_suitability(
             health_goal_conflicts=health_goal_conflicts,
             product_category=product.category,
         )
-    except Exception as e:
+    except Exception:
         import traceback
-        trace = traceback.format_exc()
-        print(trace)
-        raise HTTPException(status_code=500, detail=f"Error in suitability calculation: {str(e)}\n{trace}")
+        # The traceback goes to the server log, where it is useful and private.
+        # It used to go to the client as well — file paths, line numbers and
+        # the shape of the code, handed to anyone able to provoke an error.
+        # None of it helps the caller, who cannot act on any of it, and all of
+        # it helps someone mapping the application.
+        print(f"Suitability calculation failed for product {product_id}:\n{traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not calculate suitability for this product. Please try again.",
+        )
 
     return SuitabilityResponse(
         overall_score=result.overall_score,

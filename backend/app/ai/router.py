@@ -225,13 +225,17 @@ async def get_ai_report(
             # then says nothing about portions at all.
             reference_portion_g=suitability.breakdown.get("reference_portion_g"),
         )
-    except Exception as e:
+    except Exception:
         import traceback
-        trace = traceback.format_exc()
-        print(f"AI Report generation failed: {trace}")
+        # Provider exceptions carry the upstream error body, which names the
+        # model, the endpoint and the account's quota or billing state. None of
+        # that is the caller's business, and echoing it also meant trusting
+        # four separate providers to keep masking credentials in their own
+        # error text — someone else's implementation detail to depend on.
+        print(f"AI report generation failed for product {product_id}:\n{traceback.format_exc()}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to generate AI report: {str(e)}"
+            detail="Could not generate a report for this product. Please try again.",
         )
 
     return AIReportResponse(
