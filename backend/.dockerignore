@@ -12,3 +12,12 @@ __pycache__/
 *.log
 *.db
 *.sqlite3
+
+# Label photos written by a local run. main.py mounts this directory publicly
+# at /uploads, so copying it into the image would publish every product photo
+# taken during development — and the container disk is ephemeral anyway, so
+# they would not survive the first restart regardless.
+uploads/
+
+# Tests are not run from the image; the deploy runs start.sh.
+test/
