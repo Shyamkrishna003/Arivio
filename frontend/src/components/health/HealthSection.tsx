@@ -207,7 +207,7 @@ export default function HealthSection({ context, onChange }: Props) {
             </li>
             <li>
               <AlertTriangle size={15} />
-              <span><strong>This is not medical advice.</strong> ARIVIO doesn't diagnose. Talk to
+              <span><strong>This is not medical advice.</strong> Nirnavi doesn't diagnose. Talk to
                 your doctor before changing your diet.</span>
             </li>
           </ul>
@@ -338,7 +338,7 @@ export default function HealthSection({ context, onChange }: Props) {
           ))}
           <p className="health-disclaimer">
             <AlertTriangle size={14} /> These are patterns in the numbers you
-            uploaded, not diagnoses. ARIVIO can't assess your health — please
+            uploaded, not diagnoses. Nirnavi can't assess your health — please
             talk to your doctor or a dietitian.
           </p>
         </div>

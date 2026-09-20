@@ -1,4 +1,4 @@
-# Render Blueprint — the ARIVIO backend.
+# Render Blueprint — the Nirnavi backend.
 #
 # Render reads this from the repo root, so "New > Blueprint" creates the service
 # with everything below already filled in. Only the values marked `sync: false`
@@ -9,7 +9,7 @@
 # days. DATABASE_URL points at Neon (or Supabase) instead — see DEPLOY.md.
 services:
   - type: web
-    name: arivio-backend
+    name: nirnavi-backend
     runtime: docker
     plan: free
     # Both paths are relative to the repo root. The context is ./backend so the

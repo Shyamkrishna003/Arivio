@@ -70,7 +70,7 @@ export default function Landing() {
               Not a Score. <span>An Understanding.</span>
             </h2>
             <p className="section-desc">
-              A product doesn't have one universal meaning for every person. ARIVIO provides
+              A product doesn't have one universal meaning for every person. Nirnavi provides
               decision support — not judgement.
             </p>
           </div>
@@ -233,14 +233,14 @@ export default function Landing() {
                 <div className="brand-icon">
                   <ScanLine size={20} />
                 </div>
-                <span className="brand-text">ARIVIO</span>
+                <span className="brand-text">Nirnavi</span>
               </div>
               <p className="footer-tagline">Look Beyond the Label</p>
             </div>
             <div className="footer-meta">
-              <p>© {new Date().getFullYear()} ARIVIO. All rights reserved.</p>
+              <p>© {new Date().getFullYear()} Nirnavi. All rights reserved.</p>
               <p className="footer-disclaimer">
-                ARIVIO provides decision support, not medical advice. Always consult qualified professionals for health decisions.
+                Nirnavi provides decision support, not medical advice. Always consult qualified professionals for health decisions.
               </p>
             </div>
           </div>

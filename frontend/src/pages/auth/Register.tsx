@@ -63,7 +63,7 @@ export default function Register() {
             <div className="brand-icon">
               <ScanLine size={24} />
             </div>
-            <span className="brand-text">ARIVIO</span>
+            <span className="brand-text">Nirnavi</span>
           </Link>
           <h1>Create Account</h1>
           <p>Start making informed product decisions today</p>

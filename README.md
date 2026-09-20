@@ -1,10 +1,10 @@
-# ARIVIO — Look Beyond the Label
+# Nirnavi — Look Beyond the Label
 
 > AI-Powered Personalized Product Intelligence Platform
 
 ## Overview
 
-ARIVIO helps users understand whether a consumer product is appropriate for **their individual context** by analyzing product composition, ingredients, nutrition, allergens, scientific evidence, and community experiences.
+Nirnavi helps users understand whether a consumer product is appropriate for **their individual context** by analyzing product composition, ingredients, nutrition, allergens, scientific evidence, and community experiences.
 
 The core of the system is a **personalization engine** that turns a product's label into a single 0–100 Personal Suitability Score, explained by structured flags rather than presented as a black box. See [How Scoring Works](#how-scoring-works).
 
@@ -844,7 +844,7 @@ queue to drain, so clean reviews publish immediately.
 ## Project Structure
 
 ```
-arivio/
+nirnavi/
 ├── frontend/                   # React + TypeScript + Vite
 │   └── src/
 │       ├── components/         # Navbar, CommunitySection

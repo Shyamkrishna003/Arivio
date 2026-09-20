@@ -33,7 +33,7 @@ export default function Navbar() {
           <div className="brand-icon">
             <ScanLine size={20} />
           </div>
-          <span className="brand-text">ARIVIO</span>
+          <span className="brand-text">Nirnavi</span>
         </Link>
 
         <div className={`navbar-links ${isMobileMenuOpen ? 'open' : ''}`}>

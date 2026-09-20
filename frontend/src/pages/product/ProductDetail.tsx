@@ -509,7 +509,7 @@ export default function ProductDetail() {
               <div>
                 <h2>AI Intelligence Report</h2>
                 <span className="ai-provider-badge">
-                  {aiReport ? `Powered by ${aiReport.provider === 'fallback' ? 'ARIVIO Engine' : aiReport.provider}` : 'Generating...'}
+                  {aiReport ? `Powered by ${aiReport.provider === 'fallback' ? 'Nirnavi Engine' : aiReport.provider}` : 'Generating...'}
                 </span>
               </div>
             </div>

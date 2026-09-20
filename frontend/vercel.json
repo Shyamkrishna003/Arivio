@@ -5,11 +5,11 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://arivio-backend.onrender.com/api/:path*"
+      "destination": "https://nirnavi-backend.onrender.com/api/:path*"
     },
     {
       "source": "/uploads/:path*",
-      "destination": "https://arivio-backend.onrender.com/uploads/:path*"
+      "destination": "https://nirnavi-backend.onrender.com/uploads/:path*"
     },
     {
       "source": "/(.*)",
