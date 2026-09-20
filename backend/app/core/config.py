@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # A hosted provider's URL can be pasted in as given: the scheme is rewritten
     # to name asyncpg and libpq's TLS parameters are translated, in
     # app/db/url.py. Both this app and Alembic go through that.
-    DATABASE_URL: str = "postgresql+asyncpg://arivio:arivio_dev@localhost:5432/arivio"
+    DATABASE_URL: str = "postgresql+asyncpg://nirnavi:nirnavi_dev@localhost:5432/nirnavi"
     DATABASE_ECHO: bool = False
     # Sized for a managed free tier, where the connection ceiling is far below
     # a local Postgres's and is often reached through a pooler that counts

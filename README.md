@@ -113,7 +113,7 @@ App available at: http://localhost:5173
 `backend/.env` (git-ignored — never commit real keys):
 
 ```bash
-DATABASE_URL=postgresql+asyncpg://arivio:arivio_dev@localhost:5433/arivio
+DATABASE_URL=postgresql+asyncpg://nirnavi:nirnavi_dev@localhost:5433/nirnavi
 SECRET_KEY=change-me-in-production
 
 # AI is optional. Without a key the system still works — reports become
