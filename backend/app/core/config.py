@@ -5,6 +5,9 @@ Centralized configuration using pydantic-settings.
 All secrets and environment-specific values are loaded from environment variables.
 """
 
+import json
+
+from pydantic import Field
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -24,8 +27,25 @@ class Settings(BaseSettings):
     PORT: int = 8000
 
     # Database
+    #
+    # A hosted provider's URL can be pasted in as given: the scheme is rewritten
+    # to name asyncpg and libpq's TLS parameters are translated, in
+    # app/db/url.py. Both this app and Alembic go through that.
     DATABASE_URL: str = "postgresql+asyncpg://arivio:arivio_dev@localhost:5432/arivio"
     DATABASE_ECHO: bool = False
+    # Sized for a managed free tier, where the connection ceiling is far below
+    # a local Postgres's and is often reached through a pooler that counts
+    # every connection against it. Raise on a dedicated database.
+    DATABASE_POOL_SIZE: int = 5
+    DATABASE_MAX_OVERFLOW: int = 5
+    # Set false behind a TRANSACTION-mode pooler — Supabase's port 6543,
+    # PgBouncer in transaction pooling, Supavisor. Those hand a connection to a
+    # different client between statements, so a prepared statement created on
+    # one is missing on the next, and asyncpg fails with a
+    # DuplicatePreparedStatementError or InvalidSQLStatementName that looks
+    # nothing like a configuration problem. Session-mode poolers (port 5432)
+    # and direct connections are fine as-is.
+    DATABASE_PREPARED_STATEMENTS: bool = True
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -37,12 +57,24 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # CORS
-    CORS_ORIGINS: list[str] = [
-        "http://localhost:5173", 
-        "http://localhost:3000",
-        "http://192.168.1.8:5173",
-        "http://192.168.1.8:5173"
-    ]
+    #
+    # Both shapes are accepted, because both are what someone types into a
+    # hosting dashboard:
+    #
+    #     CORS_ORIGINS=["https://arivio.vercel.app"]
+    #     CORS_ORIGINS=https://arivio.vercel.app,https://www.arivio.app
+    #
+    # Only the first used to work. As a list[str] field, pydantic-settings
+    # json-decodes the value inside the environment source — before any
+    # validator of ours could see it — so a bare hostname aborted startup with
+    # a parse error naming the field and not the fix. The very value shipped in
+    # .env.example did it. Carried as a string and split by the property below.
+    #
+    # Read it as settings.CORS_ORIGINS; this raw field is only the transport.
+    CORS_ORIGINS_RAW: str = Field(
+        default="http://localhost:5173,http://localhost:3000,http://192.168.1.8:5173",
+        validation_alias="CORS_ORIGINS",
+    )
 
     # AI Gateway
     #
@@ -158,7 +190,39 @@ class Settings(BaseSettings):
         "env_file": ".env",
         "env_file_encoding": "utf-8",
         "case_sensitive": True,
+        # So the field is also settable by its own name, which tests and
+        # scripts constructing Settings() directly expect.
+        "populate_by_name": True,
     }
+
+    @property
+    def CORS_ORIGINS(self) -> list[str]:
+        """
+        Browser origins allowed to call the API cross-origin.
+
+        A trailing slash is trimmed: an Origin header never carries a path, so
+        "https://arivio.vercel.app/" would match nothing and the symptom —
+        every request blocked by the browser, the server reporting no error at
+        all — points nowhere near the typo.
+        """
+        raw = self.CORS_ORIGINS_RAW.strip()
+        if not raw:
+            return []
+
+        if raw.startswith("["):
+            try:
+                items = json.loads(raw)
+            except json.JSONDecodeError as e:
+                # Loud and specific: silently falling back to a comma split
+                # would produce origins like '["https' that match nothing.
+                raise ValueError(
+                    f"CORS_ORIGINS looks like JSON but does not parse: {e}. "
+                    "Fix the JSON, or write a plain comma-separated list."
+                ) from e
+        else:
+            items = raw.split(",")
+
+        return [str(item).strip().rstrip("/") for item in items if str(item).strip()]
 
 
 @lru_cache

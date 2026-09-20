@@ -1,0 +1,59 @@
+# Render Blueprint — the ARIVIO backend.
+#
+# Render reads this from the repo root, so "New > Blueprint" creates the service
+# with everything below already filled in. Only the values marked `sync: false`
+# need typing into the dashboard, because they are secrets or point at accounts
+# Render knows nothing about.
+#
+# Deliberately no database here: Render's free Postgres is deleted after 30
+# days. DATABASE_URL points at Neon (or Supabase) instead — see DEPLOY.md.
+services:
+  - type: web
+    name: arivio-backend
+    runtime: docker
+    plan: free
+    # Both paths are relative to the repo root. The context is ./backend so the
+    # Dockerfile's `COPY . .` picks up the backend tree and not the frontend.
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    # Cheapest round trip to a South Asian user of the four Render regions.
+    region: singapore
+    # Hit until it answers, so a deploy is not marked live before migrations
+    # have finished. app/main.py serves this outside API_PREFIX and it touches
+    # no database, which is what makes it usable as a liveness probe.
+    healthCheckPath: /health
+    envVars:
+      - key: DEBUG
+        value: false
+      # Signs every JWT. Generated once by Render and then held: changing it
+      # invalidates every issued token, logging out every user.
+      - key: SECRET_KEY
+        generateValue: true
+      # Neon's pooled connection string, pasted as the dashboard gives it —
+      # app/db/url.py rewrites the scheme and the TLS parameters.
+      - key: DATABASE_URL
+        sync: false
+      # Upstash's rediss:// URL. The app runs without it — the cache degrades to
+      # a miss — but the OCR confirmation screen needs it to survive a reload.
+      - key: REDIS_URL
+        sync: false
+      # Only consulted for a request that arrives cross-origin. The Vercel
+      # rewrite makes the browser's calls same-origin, so this covers direct
+      # hits on the onrender.com URL: previews, curl, a bookmarked /docs.
+      - key: CORS_ORIGINS
+        sync: false
+      # Fernet key for health markers at rest. Left unset the health endpoints
+      # answer 503 and store nothing, which is the intended failure. Must be a
+      # real Fernet key, so not generateValue:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      - key: HEALTH_ENCRYPTION_KEY
+        sync: false
+      # At least one is needed for AI reports and for label reading; with none,
+      # reports fall back to the rule-based path and OCR to tesseract.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      # Open Food Facts throttles clients that do not identify themselves.
+      - key: OPEN_FOOD_FACTS_USER_AGENT
+        sync: false
