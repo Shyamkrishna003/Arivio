@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.cache import get_json, set_json
 from app.core.config import get_settings
 from app.core.security import get_current_user
+from app.core.uploads import read_upload_capped
 from app.db.session import get_db
 from app.ocr.gateway import PROMPT_VERSION, extract_label, resolve_model, resolve_provider
 from app.ocr.schemas import (
@@ -133,8 +134,17 @@ async def scan_label(
     checksum-verified barcode — everything else comes back as a proposal for
     the user to confirm or correct.
     """
+    # Capped while reading: normalize_image() enforces the same limit, but only
+    # after the whole body is in memory, which is too late to be a defence.
+    raw = await read_upload_capped(
+        file,
+        settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024,
+        too_large_detail=(
+            f"That image is larger than the {settings.MAX_UPLOAD_SIZE_MB}MB limit. "
+            "Try a photo taken at a lower resolution."
+        ),
+    )
     try:
-        raw = await file.read()
         image = store_image(raw, file.content_type)
     except ImageRejected as e:
         raise HTTPException(

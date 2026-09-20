@@ -26,6 +26,7 @@ from app.products.schemas import (
     ProductMatchResponse, ProductSuggestion, ExternalCandidate,
     ProductImportRequest, ProductImageResponse, SavedProductResponse,
 )
+from app.core.uploads import read_upload_capped
 from app.ocr.storage import (
     ImageRejected, ImageStorageUnavailable, store_image, stored_image_url,
 )
@@ -210,8 +211,17 @@ async def upload_product_image(
     leaves an unreferenced file; because storage is content-addressed, the
     same photo uploaded twice is one file either way.
     """
+    # Capped while reading — see app/core/uploads.py for why the length check
+    # inside normalize_image() is not enough on its own.
+    raw = await read_upload_capped(
+        file,
+        settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024,
+        too_large_detail=(
+            f"That image is larger than the {settings.MAX_UPLOAD_SIZE_MB}MB limit. "
+            "Try a photo taken at a lower resolution."
+        ),
+    )
     try:
-        raw = await file.read()
         image = store_image(raw, file.content_type)
     except ImageRejected as e:
         raise HTTPException(

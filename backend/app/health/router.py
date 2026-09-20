@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.security import get_current_user
+from app.core.uploads import read_upload_capped
 from app.db.session import get_db
 from app.health.analytes import ANALYTES, flag_for, normalize_analyte
 from app.health.crypto import (
@@ -348,16 +349,19 @@ async def upload_document(
             detail=f"'{file.content_type}' files aren't supported. Upload a PDF or a photo.",
         )
 
-    data = await file.read()
+    # The limit is applied while reading rather than after, so an oversized
+    # document costs the limit in memory and not whatever was sent.
+    data = await read_upload_capped(
+        file,
+        settings.MAX_HEALTH_DOCUMENT_MB * 1024 * 1024,
+        too_large_detail=(
+            f"That file is larger than the {settings.MAX_HEALTH_DOCUMENT_MB}MB limit."
+        ),
+    )
     if not data:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="That file is empty.",
-        )
-    if len(data) > settings.MAX_HEALTH_DOCUMENT_MB * 1024 * 1024:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"That file is larger than the {settings.MAX_HEALTH_DOCUMENT_MB}MB limit.",
         )
 
     from app.health.extraction import extract_from_document

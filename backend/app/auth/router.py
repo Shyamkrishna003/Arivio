@@ -2,10 +2,13 @@
 Auth API routes.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from app.core.ratelimit import (
+    REFRESH_LIMIT, REGISTER_LIMIT, client_ip, enforce, enforce_login,
+)
 from app.db.session import get_db
 from app.users.models import User, PrivacySetting
 from app.core.security import (
@@ -20,8 +23,17 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def register(data: UserRegister, db: AsyncSession = Depends(get_db)):
+async def register(
+    data: UserRegister, request: Request, db: AsyncSession = Depends(get_db)
+):
     """Register a new user account."""
+    # Before the uniqueness check, not after: the 409 below confirms whether an
+    # address is registered, so an unthrottled endpoint is also an email
+    # oracle. Throttling does not remove that — telling a real user their
+    # address is taken is the point of the message — but it does put a ceiling
+    # on how much of a list can be tested.
+    await enforce("register-ip", client_ip(request), REGISTER_LIMIT)
+
     # Check email uniqueness
     result = await db.execute(select(User).where(User.email == data.email))
     if result.scalar_one_or_none():
@@ -61,8 +73,14 @@ async def register(data: UserRegister, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(data: UserLogin, db: AsyncSession = Depends(get_db)):
+async def login(
+    data: UserLogin, request: Request, db: AsyncSession = Depends(get_db)
+):
     """Authenticate user and return tokens."""
+    # Counted before the password is checked, so a wrong guess costs the same
+    # budget as a right one and the limit cannot be probed for free.
+    await enforce_login(request, data.email)
+
     result = await db.execute(select(User).where(User.email == data.email))
     user = result.scalar_one_or_none()
 
@@ -86,8 +104,14 @@ async def login(data: UserLogin, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(data: TokenRefresh, db: AsyncSession = Depends(get_db)):
+async def refresh_token(
+    data: TokenRefresh, request: Request, db: AsyncSession = Depends(get_db)
+):
     """Refresh an access token."""
+    # Generous, because the client calls this automatically whenever an access
+    # token expires — this is here to bound token-guessing, not real traffic.
+    await enforce("refresh-ip", client_ip(request), REFRESH_LIMIT)
+
     payload = decode_token(data.refresh_token)
 
     if payload.get("type") != "refresh":

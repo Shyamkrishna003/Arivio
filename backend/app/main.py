@@ -41,14 +41,45 @@ async def lifespan(app: FastAPI):
     print(f"🛑 {settings.APP_NAME} shutting down...")
 
 
+# Interactive docs follow DEBUG, which until now was read nowhere and so meant
+# nothing. A deployed backend publishing /docs, /redoc and /openapi.json hands
+# anyone a complete map of every endpoint, parameter and schema — including the
+# ones that only fail on the second validation step. Set DEBUG=true to get them
+# back in an environment where that is wanted.
+_docs_enabled = settings.DEBUG
+
 app = FastAPI(
     title=settings.APP_NAME,
     description=settings.APP_DESCRIPTION,
     version=settings.APP_VERSION,
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    # Without this the schema stays reachable and the docs pages are the only
+    # thing hidden, which protects nothing.
+    openapi_url="/openapi.json" if _docs_enabled else None,
 )
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    """
+    Response hardening headers.
+
+    The one that earns its place here is nosniff. /uploads serves files that
+    users supplied; a browser that content-sniffs its way from "JPEG" to
+    "HTML" on one of them would run it on this origin. The images are
+    re-encoded from raw pixels on the way in, which already makes that very
+    hard, but the header costs nothing and does not rely on that holding.
+
+    frame-options and referrer-policy are defence in depth: an API has no UI
+    to frame, and its URLs carry no secrets, but both are free.
+    """
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
+
 
 # CORS
 app.add_middleware(
