@@ -36,6 +36,46 @@ class OFFSearchCandidate(BaseModel):
     image_url: Optional[str] = None
 
 
+def _first_value(value: Any) -> Optional[str]:
+    """
+    First entry of a field that may arrive as a list or a comma-joined string.
+
+    The two search APIs disagree: Search-a-licious returns `brands` as a list,
+    the legacy CGI endpoint returned it as "Amul, Amul Dairy". Both are handled
+    here rather than at each call site, so neither response shape is special.
+    """
+    if not value:
+        return None
+    if isinstance(value, str):
+        first = value.split(",")[0].strip()
+        return first or None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            text = str(item).strip()
+            if text:
+                return text
+    return None
+
+
+def _category_label(tags: Any) -> Optional[str]:
+    """
+    Turn Search-a-licious `categories_tags` into something a person can read.
+
+    They arrive language-prefixed and hyphenated — ["en:beverages",
+    "en:dairy-drinks", "en:chocolate-milks"] — ordered general to specific. The
+    first is taken because that is what the legacy field's first entry meant,
+    so the text on a candidate card does not change character with this switch.
+    A non-English prefix is kept as the tag body rather than dropped: a rough
+    label beats none.
+    """
+    first = _first_value(tags)
+    if not first:
+        return None
+    body = first.split(":", 1)[1] if ":" in first else first
+    body = body.replace("-", " ").strip()
+    return body.capitalize() or None
+
+
 class OFFClient:
     def __init__(self):
         self.base_url = settings.OPEN_FOOD_FACTS_API_URL
@@ -59,16 +99,13 @@ class OFFClient:
         local results are still worth showing.
         """
         params = {
-            "search_terms": query,
-            "search_simple": 1,
-            "action": "process",
-            "json": 1,
+            "q": query,
             "page_size": limit,
-            "fields": "code,product_name,brands,categories,image_url",
+            "fields": "code,product_name,brands,categories_tags,image_url",
         }
         try:
-            # Absolute URL: name search is on the legacy CGI endpoint, not
-            # under the versioned API this client's base_url points at.
+            # Absolute URL: name search lives on its own host, not under the
+            # versioned API this client's base_url points at.
             response = await self.client.get(
                 settings.OPEN_FOOD_FACTS_SEARCH_URL,
                 params=params,
@@ -90,20 +127,27 @@ class OFFClient:
             return []
 
         candidates: List[Dict[str, Any]] = []
-        for raw in data.get("products", []):
+        # Search-a-licious returns "hits"; the legacy CGI endpoint returned
+        # "products". Reading both costs nothing and keeps this from being the
+        # thing that breaks if the response shape moves again — but it is not
+        # a supported fallback: the request above sends `q`, which the legacy
+        # endpoint does not understand (it answers with an HTML page, not
+        # JSON). Pointing OPEN_FOOD_FACTS_SEARCH_URL back at the old URL needs
+        # the old parameters too.
+        for raw in data.get("hits", data.get("products", [])):
             code = str(raw.get("code") or "").strip()
             name = (raw.get("product_name") or "").strip()
             # A hit with no barcode cannot be imported (the import fetches the
             # full record by code), and one with no name cannot be shown.
             if not code or not name:
                 continue
-            brands = raw.get("brands") or ""
-            categories = raw.get("categories") or ""
             candidates.append(OFFSearchCandidate(
                 code=code,
                 name=name,
-                brand=brands.split(",")[0].strip() or None if brands else None,
-                category=categories.split(",")[0].strip() or None if categories else None,
+                brand=_first_value(raw.get("brands")),
+                category=_category_label(raw.get("categories_tags")) or _first_value(
+                    raw.get("categories")
+                ),
                 image_url=raw.get("image_url") or None,
             ).model_dump())
 

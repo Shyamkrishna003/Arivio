@@ -152,8 +152,18 @@ class Settings(BaseSettings):
 
     # External Data Sources
     OPEN_FOOD_FACTS_API_URL: str = "https://world.openfoodfacts.org/api/v2"
-    # Name search lives outside the versioned API, on the legacy CGI endpoint.
-    OPEN_FOOD_FACTS_SEARCH_URL: str = "https://world.openfoodfacts.org/cgi/search.pl"
+    # Name search lives on its own host, not under the versioned API.
+    #
+    # This was world.openfoodfacts.org/cgi/search.pl, the legacy endpoint, and
+    # that one returns nothing when called from a hosted backend while working
+    # normally from a laptop — the deployed app had a search box that found no
+    # products at all. The barcode lookup on api/v2 was unaffected from the
+    # same host, so it is that endpoint refusing datacenter traffic rather
+    # than Open Food Facts blocking the address.
+    #
+    # Search-a-licious is also the direction Open Food Facts is moving name
+    # search in, so this is where it was going anyway.
+    OPEN_FOOD_FACTS_SEARCH_URL: str = "https://search.openfoodfacts.org/search"
     # Open Food Facts asks every client to identify itself and throttles
     # generic agents. Override with real contact details in production.
     OPEN_FOOD_FACTS_USER_AGENT: str = "Nirnavi/0.1 (https://github.com/nirnavi)"
