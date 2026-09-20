@@ -76,7 +76,17 @@ class OFFClient:
             )
             response.raise_for_status()
             data = response.json()
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError) as e:
+            # Logged, not silent. An upstream block and a genuine zero-result
+            # search both produce an empty candidate list, and telling them
+            # apart from the outside is impossible — which matters because Open
+            # Food Facts rate-limits datacenter IPs, so this can fail in a
+            # deployment while working from a laptop.
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            print(
+                f"⚠️ Open Food Facts search failed for {query!r}: "
+                f"{type(e).__name__}{f' HTTP {status}' if status else ''}: {e}"
+            )
             return []
 
         candidates: List[Dict[str, Any]] = []
@@ -108,8 +118,17 @@ class OFFClient:
             
             if data.get("status") == 1 and "product" in data:
                 return self._normalize_product(data["product"])
+            # A reachable API that does not hold this barcode. Distinct from
+            # the exception below, and the distinction is the whole point:
+            # one means "no such product", the other means "we never asked".
+            print(f"ℹ️ Open Food Facts has no product for barcode {barcode}")
             return None
-        except httpx.HTTPError:
+        except httpx.HTTPError as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            print(
+                f"⚠️ Open Food Facts barcode lookup failed for {barcode}: "
+                f"{type(e).__name__}{f' HTTP {status}' if status else ''}: {e}"
+            )
             return None
             
     def _normalize_product(self, raw_product: Dict[str, Any]) -> Dict[str, Any]:
