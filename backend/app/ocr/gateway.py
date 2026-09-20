@@ -1,5 +1,5 @@
 """
-ARIVIO OCR Gateway — provider-independent label reading.
+Nirnavi OCR Gateway — provider-independent label reading.
 
 Mirrors app.ai.gateway: one entry point, several providers, and a local
 fallback that always works. The difference is what it returns — the AI gateway

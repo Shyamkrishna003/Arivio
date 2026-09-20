@@ -67,7 +67,7 @@ def make_gps_exif() -> bytes:
         1: "N", 2: (51.0, 30.0, 0.0),    # latitude
         3: "W", 4: (0.0, 7.0, 0.0),      # longitude
     }
-    exif[0x0110] = "ARIVIO-TEST-CAMERA"  # Model
+    exif[0x0110] = "NIRNAVI-TEST-CAMERA"  # Model
     exif[0x0112] = 6                     # Orientation: rotate 90°
     return exif.tobytes()
 
@@ -77,9 +77,9 @@ def test_image_handling() -> None:
 
     # GPS in, nothing out.
     raw = make_image(exif=make_gps_exif())
-    check(b"ARIVIO-TEST-CAMERA" in raw, "test image really carries EXIF to begin with")
+    check(b"NIRNAVI-TEST-CAMERA" in raw, "test image really carries EXIF to begin with")
     clean, w, h = normalize_image(raw, "image/jpeg")
-    check(b"ARIVIO-TEST-CAMERA" not in clean, "EXIF camera model stripped")
+    check(b"NIRNAVI-TEST-CAMERA" not in clean, "EXIF camera model stripped")
     reloaded = Image.open(io.BytesIO(clean))
     check(not reloaded.getexif(), "no EXIF block survives at all (GPS included)")
     # Orientation 6 means the stored image should come out rotated.
@@ -329,7 +329,7 @@ async def test_http_flow() -> None:
         base_root = BASE.rsplit("/api/", 1)[0]
         r3 = await client.get(f"{base_root}/uploads/{sha}.jpg")
         check(r3.status_code == 200, "stored image is served")
-        check(b"ARIVIO-TEST-CAMERA" not in r3.content, "served image carries no EXIF")
+        check(b"NIRNAVI-TEST-CAMERA" not in r3.content, "served image carries no EXIF")
 
         # Confirm, with the user correcting the misread name.
         r4 = await client.post(f"{BASE}/ocr/confirm", headers=auth, json={

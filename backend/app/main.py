@@ -1,5 +1,5 @@
 """
-ARIVIO — Personalized Product Intelligence Platform
+Nirnavi — Personalized Product Intelligence Platform
 
 Main FastAPI application entry point.
 """

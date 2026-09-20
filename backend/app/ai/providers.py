@@ -101,7 +101,7 @@ PROVIDERS: dict[str, Provider] = {
         supports_json_mode=False,
         # OpenRouter asks callers to identify themselves; it also affects
         # free-tier rate limits.
-        extra_headers={"X-Title": "ARIVIO"},
+        extra_headers={"X-Title": "Nirnavi"},
     ),
     "openai": Provider(
         name="openai",

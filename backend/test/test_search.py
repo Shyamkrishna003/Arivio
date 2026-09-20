@@ -47,7 +47,7 @@ import app.health.models  # noqa: F401,E402
 from app.products.models import DataQuality, Product, VerificationStatus  # noqa: E402
 from app.products.search import search_products, suggest_products  # noqa: E402
 
-MARKER = "ARIVIO_SEARCH_TEST"
+MARKER = "NIRNAVI_SEARCH_TEST"
 
 SEED = [
     ("Pasteurised Butter 500g", "Amul", "Dairy"),

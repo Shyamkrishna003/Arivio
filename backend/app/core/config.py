@@ -1,5 +1,5 @@
 """
-ARIVIO Backend Configuration
+Nirnavi Backend Configuration
 
 Centralized configuration using pydantic-settings.
 All secrets and environment-specific values are loaded from environment variables.
@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # Application
-    APP_NAME: str = "ARIVIO"
+    APP_NAME: str = "Nirnavi"
     APP_VERSION: str = "0.1.0"
     APP_DESCRIPTION: str = "Personalized Product Intelligence Platform"
     DEBUG: bool = True
@@ -61,8 +61,8 @@ class Settings(BaseSettings):
     # Both shapes are accepted, because both are what someone types into a
     # hosting dashboard:
     #
-    #     CORS_ORIGINS=["https://arivio.vercel.app"]
-    #     CORS_ORIGINS=https://arivio.vercel.app,https://www.arivio.app
+    #     CORS_ORIGINS=["https://nirnavi.vercel.app"]
+    #     CORS_ORIGINS=https://nirnavi.vercel.app,https://www.nirnavi.app
     #
     # Only the first used to work. As a list[str] field, pydantic-settings
     # json-decodes the value inside the environment source — before any
@@ -156,7 +156,7 @@ class Settings(BaseSettings):
     OPEN_FOOD_FACTS_SEARCH_URL: str = "https://world.openfoodfacts.org/cgi/search.pl"
     # Open Food Facts asks every client to identify itself and throttles
     # generic agents. Override with real contact details in production.
-    OPEN_FOOD_FACTS_USER_AGENT: str = "ARIVIO/0.1 (https://github.com/arivio)"
+    OPEN_FOOD_FACTS_USER_AGENT: str = "Nirnavi/0.1 (https://github.com/nirnavi)"
     # Name search is slower and more rate-limited than the barcode lookup, and
     # runs while a user waits — so it gets a tight timeout and a cache.
     OPEN_FOOD_FACTS_SEARCH_TIMEOUT: float = 6.0
@@ -201,7 +201,7 @@ class Settings(BaseSettings):
         Browser origins allowed to call the API cross-origin.
 
         A trailing slash is trimmed: an Origin header never carries a path, so
-        "https://arivio.vercel.app/" would match nothing and the symptom —
+        "https://nirnavi.vercel.app/" would match nothing and the symptom —
         every request blocked by the browser, the server reporting no error at
         all — points nowhere near the typo.
         """

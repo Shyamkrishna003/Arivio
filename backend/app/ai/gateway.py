@@ -1,5 +1,5 @@
 """
-ARIVIO AI Gateway — Provider-Independent AI Service
+Nirnavi AI Gateway — Provider-Independent AI Service
 
 Supports multiple LLM providers through a unified interface.
 Providers: OpenAI (GPT), Google (Gemini), Groq (Llama), or local fallback (rule-based).
@@ -163,7 +163,7 @@ def _build_prompt(
                 )
         feedback_text += "\nPay special attention to negative feedback — those highlight what the user wants changed.\n"
 
-    prompt = f"""You are ARIVIO, a personalized product intelligence assistant. Analyze this product evaluation and generate a clear, helpful report for the user.
+    prompt = f"""You are Nirnavi, a personalized product intelligence assistant. Analyze this product evaluation and generate a clear, helpful report for the user.
 
 ## Product Data
 {product_info}
@@ -265,7 +265,7 @@ def _parse_ai_response(raw: str) -> dict:
 
 
 SYSTEM_PROMPT = (
-    "You are ARIVIO, a personalized product intelligence AI. Always respond "
+    "You are Nirnavi, a personalized product intelligence AI. Always respond "
     "with valid JSON only, no markdown code blocks."
 )
 

@@ -1,5 +1,5 @@
 """
-Personalization Engine — The Core Brain of Arivio
+Personalization Engine — The Core Brain of Nirnavi
 
 This module calculates a Personal Suitability Score (0-100) for a product
 based on a user's health profile (goals, allergies, preferences).

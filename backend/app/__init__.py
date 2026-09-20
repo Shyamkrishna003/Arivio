@@ -1,1 +1,1 @@
-# ARIVIO Backend Application
+# Nirnavi Backend Application
