@@ -70,6 +70,7 @@ def _build_prompt(
     user_goals: list[dict],
     user_allergies: list[dict],
     user_feedback_examples: list[dict] = None,
+    reference_portion_g: Optional[float] = None,
 ) -> str:
     """Build a structured prompt for the LLM."""
 
@@ -79,6 +80,25 @@ def _build_prompt(
         product_info += f" by {product_brand}"
     if product_category:
         product_info += f" (Category: {product_category})"
+
+    # How much of this someone actually uses at once, where the category knows.
+    #
+    # Without this the report could only talk in per-100g figures, and for a
+    # product nobody consumes 100g of — butter, soy sauce, cinnamon — that is
+    # the wrong quantity to reason about. Nobody eats a pack of butter; they
+    # put a pat on toast, and a report that judges the pack answers a question
+    # they did not ask.
+    #
+    # It is passed as a number the engine derived per category, never as the
+    # label's declared serving size, which a manufacturer sets and can shrink.
+    # The rule below is written so the model may only use THIS figure, so it
+    # still cannot invent a flattering serving of its own.
+    portion_text = ""
+    if reference_portion_g:
+        portion_text = (
+            f"\n**Typical portion:** about {reference_portion_g:g}g — this is how much "
+            "of this kind of product a person actually uses at once."
+        )
 
     # Build nutrition summary
     nutrition_text = "Not available"
@@ -168,7 +188,7 @@ def _build_prompt(
 ## Product Data
 {product_info}
 
-**Nutrition (per 100g):** {nutrition_text}
+**Nutrition (per 100g):** {nutrition_text}{portion_text}
 **Ingredients:** {ingredients_text}
 **Total ingredients count:** {len(ingredients)}
 
@@ -210,8 +230,18 @@ IMPORTANT RULES:
   than presenting your reading as clinical guidance.
 - Keep the tone helpful and empowering, not scary
 - Be specific: reference actual numbers from the nutrition data
-- Nutrition figures are per 100g, NOT per serving — say "per 100g" when you
-  quote a number, and never describe one as a serving amount"""
+- Nutrition figures are per 100g. When you quote one as given, say "per 100g",
+  and never invent a serving size or describe a per-100g figure as a serving
+- If a "Typical portion" is given above, you SHOULD also say what that portion
+  works out to for the one or two nutrients that matter most here, because
+  per-100g is the wrong quantity for a product nobody consumes 100g of: for
+  butter, "a 14g pat gives you about 7g of saturated fat, roughly a third of a
+  day's worth" is far more useful than the figure for 100g of butter. Do the
+  arithmetic from the per-100g numbers and the portion size, show the portion
+  in grams, and use ONLY the portion given — never one you chose yourself
+- A realistic portion is context, not an excuse. If the portion still delivers
+  a lot of something — a spoon of soy sauce is still around 40% of a day's
+  sodium — say so plainly. Small serving does not mean harmless"""
 
     return prompt
 
@@ -446,6 +476,7 @@ async def generate_report(
     user_goals: list[dict],
     user_allergies: list[dict],
     user_feedback_examples: list[dict] = None,
+    reference_portion_g: Optional[float] = None,
 ) -> AIReport:
     """
     Generate an AI-powered product report.
@@ -487,6 +518,7 @@ async def generate_report(
         user_goals=user_goals,
         user_allergies=user_allergies,
         user_feedback_examples=user_feedback_examples,
+        reference_portion_g=reference_portion_g,
     )
 
     try:

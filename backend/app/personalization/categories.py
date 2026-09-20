@@ -120,7 +120,13 @@ CATEGORY_PROFILES: dict[str, dict] = {
         # beverages on their own stricter scale for exactly this reason; the
         # FSA's front-of-pack red line for drinks is likewise half the one for
         # food (11.25g of sugar per 100ml, not 22.5g).
-        "threshold_scale": {"total_sugars_g": 0.5},
+        # Carbohydrate is scaled alongside sugar, not instead of it. In a
+        # sugary drink the two are very nearly the same grams, so leaving
+        # carbohydrate on the solid-food scale let a cola score a perfect 100
+        # for "low carbohydrate" — 10.6g reads as comfortably under a 20g
+        # limit — while the identical 10.6g was being penalised as sugar. One
+        # quantity, counted twice, in opposite directions.
+        "threshold_scale": {"total_sugars_g": 0.5, "total_carbohydrates_g": 0.5},
         "note": "Scored on the stricter scale used for drinks.",
     },
     "added_fats": {
@@ -161,6 +167,23 @@ CATEGORY_PROFILES: dict[str, dict] = {
         "not_applicable": set(),
         "note": "Used by the spoonful, so its per-100g figures are judged against a realistic portion.",
     },
+    # Deliberately given no reference portion. A portion would SOFTEN the
+    # score, and these do not need softening — 30g of crisps still delivers
+    # what makes crisps crisps. What they needed was to stop being praised for
+    # the one bad thing they happen not to contain.
+    "savoury_snacks": {
+        "label": "Savoury snack",
+        # Sugar is not the axis these live or die on, and scoring it handed a
+        # bag of crisps a "low sugar" bonus worth +12 — the largest single
+        # positive in its whole breakdown, for not being a biscuit. Removing
+        # it does not penalise them; it stops them being rewarded on an axis
+        # that carries no information about them.
+        "not_applicable": {"total_sugars_g"},
+        "note": (
+            "Judged as a savoury snack: sugar says nothing useful about one, "
+            "so it is scored on salt and energy density instead."
+        ),
+    },
 }
 
 
@@ -186,6 +209,17 @@ _EXCLUSIONS: dict[str, tuple[str, ...]] = {
         # suggests. Giving these a 15g portion would understate them.
         "pasta sauce", "cooking sauce", "curry sauce", "simmer sauce",
         "baked bean", "soup",
+    ),
+    "savoury_snacks": (
+        # "chip" and "cracker" are the broad ones. Each of these is sweet, or
+        # is a meal, and would be scored on the wrong axis — a chocolate chip
+        # cookie judged as a savoury snack would have its sugar ignored, which
+        # is the one number that matters for it.
+        "chocolate chip", "choc chip", "chocolate", "cookie", "biscuit",
+        "graham cracker", "sweet cracker", "fruit chip", "banana chip",
+        "apple chip", "candy", "toffee", "caramel",
+        # A cooked meal, not a snack by the handful.
+        "fish and chips", "chips and", "french fries", "frozen chip",
     ),
     "seasonings": (
         # A "spice mix" sold as a meal base is not a seasoning by the spoonful.
@@ -228,6 +262,12 @@ _KEYWORDS: dict[str, tuple[str, ...]] = {
         "beverage", "drink", "juice", "soda", "cola", "soft drink",
         "water", "tea", "coffee", "smoothie", "cordial", "lemonade",
         "energy drink", "boisson", "bebida", "nectar", "infusion",
+    ),
+    "savoury_snacks": (
+        "crisp", "potato chip", "savoury snack", "savory snack",
+        "namkeen", "bhujia", "sev", "mixture", "extruded snack",
+        "tortilla chip", "nacho", "pretzel", "papad", "pappadam",
+        "salted popcorn", "cracker", "wafer snack", "chips",
     ),
 }
 
@@ -333,6 +373,8 @@ def get_profile(category_key: Optional[str]) -> Optional[dict]:
 def apply_category_view(
     nutrition: Optional[dict],
     profile: Optional[dict],
+    *,
+    include_derived: bool = True,
 ) -> Optional[dict]:
     """
     Present the nutrition as this category should be judged.
@@ -352,7 +394,13 @@ def apply_category_view(
     for key in profile.get("not_applicable", ()):  # noqa: SIM118 — set or dict
         view[key] = None
 
-    for key, rule in (profile.get("derived") or {}).items():
+    # A caller whose thresholds are in absolute grams must NOT be handed the
+    # derived share, which is a percentage. The health path was, and so
+    # compared butter's "63" — 63% of its fat being saturated — against a
+    # cut-off meaning 5 grams, and printed it back to the user as "saturated
+    # fat 63g per 100g" for a product containing 51g. The number, the unit and
+    # the comparison were all wrong at once.
+    for key, rule in ((profile.get("derived") or {}) if include_derived else {}).items():
         if rule != "saturated_share_of_fat":
             continue
         saturated = nutrition.get("saturated_fat_g")

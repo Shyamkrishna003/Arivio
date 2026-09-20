@@ -1194,6 +1194,8 @@ _HEALTH_SEVERITY_WEIGHT = {"high": 1.0, "moderate": 0.7, "low": 0.4}
 def _evaluate_health_context(
     health_conditions: list[dict],
     nutrition: Optional[dict],
+    category_profile: Optional[dict] = None,
+    portion_g: Optional[float] = None,
 ) -> tuple[list[SuitabilityFlag], int, str]:
     """
     Score the product against patterns found in the user's health documents.
@@ -1218,6 +1220,23 @@ def _evaluate_health_context(
     if not health_conditions or not nutrition:
         return flags, 0, "none"
 
+    # A product that supplies nothing must not be *praised* for supplying
+    # nothing. Every health profile is mostly a list of nutrients to keep low,
+    # so a drink with no protein, no potassium and no phosphorus scores a
+    # perfect 100 on each and earns a full bonus — a cola came back labelled
+    # "Fits your recent results — reduced kidney function", which is both wrong
+    # and the sort of wrong that could move a real decision.
+    #
+    # Penalties are deliberately NOT gated: something bad for a marker is bad
+    # whether or not it also happens to be nutritious. This only withholds
+    # credit, mirroring `earns_absence_credit` in the quality index.
+    may_earn_bonus = _provides_nutrition(nutrition) is not False
+
+    # Quoted figures must name the quantity they were judged on. Saying
+    # "per 100g" beside a number computed for a 14g portion would be a
+    # straightforwardly false statement about someone's health data.
+    basis = f"in a typical {_fmt(portion_g)}g serving" if portion_g else "per 100g"
+
     total = 0.0
     worst = 0.0
 
@@ -1228,6 +1247,9 @@ def _evaluate_health_context(
         prefer_high = set(condition.get("prefer_high") or [])
 
         scores: list[tuple[float, float]] = []   # (0-100 score, weight)
+        # Tracked separately because absence of a protective nutrient is not
+        # evidence of a harmful one. See the clamp below.
+        saw_prefer_low = False
         offenders: list[str] = []
         helpers: list[str] = []
 
@@ -1243,11 +1265,33 @@ def _evaluate_health_context(
             if value is None:
                 continue
 
-            good, bad = limits["good"], limits["bad"]
+            # What a health marker responds to is the amount actually
+            # consumed, so where the category knows a realistic portion, the
+            # comparison is made on that amount against the profile's own
+            # absolute limits. These profiles are sized for a normal helping of
+            # a normal food, which is roughly 100g — so for anything eaten by
+            # the spoonful, per-100g was the wrong quantity and the thresholds
+            # saturated. Every cooking fat sailed past a 5g saturated-fat limit
+            # and scored identically: olive oil was penalised exactly as hard
+            # as coconut oil for a reader with high cholesterol, which is the
+            # opposite of the advice. Per 14g they separate properly.
+            #
+            # The portion takes precedence over threshold_scale rather than
+            # compounding with it. Applying both would count the same
+            # correction twice — a drink would have its sugar limit halved AND
+            # its sugar multiplied by 2.5.
+            if portion_g:
+                value = value * portion_g / 100.0
+                good, bad = limits["good"], limits["bad"]
+            else:
+                scale = _cat.threshold_scale(category_profile, nutrient)
+                good = limits["good"] * scale
+                bad = limits["bad"] * scale
             if good == bad:
                 continue
 
             if nutrient in prefer_low:
+                saw_prefer_low = True
                 if value <= good:
                     score = 100.0
                 elif value >= bad:
@@ -1267,23 +1311,43 @@ def _evaluate_health_context(
             scores.append((score, weight))
 
             pretty = _HEALTH_NUTRIENT_LABELS.get(nutrient, nutrient.replace("_", " "))
+            unit = _health_unit(nutrient)
             if score <= 35:
-                offenders.append(f"{pretty} {_fmt(value)}")
+                offenders.append(f"{pretty} {_fmt(value)}{unit}")
             elif score >= 80:
-                helpers.append(f"{pretty} {_fmt(value)}")
+                helpers.append(f"{pretty} {_fmt(value)}{unit}")
 
         if not scores:
             continue
 
         total_weight = sum(w for _, w in scores) or 1.0
         condition_score = sum(s * w for s, w in scores) / total_weight
+
+        # Missing nutrients are skipped, which is right — but skipping leaves
+        # the survivors carrying the whole weight, and that turned a single
+        # protective nutrient into a verdict. A drink whose only
+        # cholesterol-relevant figure was `fiber_g: 0` scored 0 for the
+        # condition and took the full penalty, judged as harshly as butter
+        # while nothing was known about its saturated or trans fat. Both are
+        # common in Open Food Facts records, so this was not a corner case.
+        #
+        # Low fibre is not high saturated fat. With no harmful nutrient
+        # actually observed the condition cannot push a score down; it may
+        # still lift one, which is what fibre genuinely evidences.
+        if not saw_prefer_low:
+            condition_score = max(condition_score, 50.0)
+
         severity = _HEALTH_SEVERITY_WEIGHT.get(condition.get("severity", "moderate"), 0.7)
 
         # 0 → full penalty, 50 → neutral, 100 → full bonus.
         if condition_score < 50:
             points = -((50 - condition_score) / 50) * _HEALTH_PENALTY_CAP * severity
-        else:
+        elif may_earn_bonus:
             points = ((condition_score - 50) / 50) * _HEALTH_BONUS_CAP * severity
+        else:
+            # Scores above neutral, but only because it contains nothing.
+            # Neither credited nor punished for that.
+            points = 0.0
 
         total += points
         worst = min(worst, points)
@@ -1297,7 +1361,7 @@ def _evaluate_health_context(
                 # Phrased as an observation about the product relative to a
                 # reading, never as a statement about the person's health.
                 description=(
-                    f"{', '.join(offenders) or 'This product'} per 100g. "
+                    f"{', '.join(offenders) or 'This product'} {basis}. "
                     f"{condition.get('explanation', '')}"
                 ).strip(),
                 impact=int(points),
@@ -1306,9 +1370,21 @@ def _evaluate_health_context(
             flags.append(SuitabilityFlag(
                 flag_type="positive",
                 category="health",
-                title=f"Fits your recent results — {label.lower()}",
+                # Phrased as absence of harm, not as positive fit — the
+                # mirror image of the warning above rather than an
+                # endorsement. What earns this is scoring well on the
+                # nutrients a condition watches, and a product can do that by
+                # not containing them: butter is low in potassium, phosphorus
+                # and protein, so it cleared the bar for reduced kidney
+                # function and was announced as "fits your recent results" —
+                # reading, on a 51%-saturated-fat product, as advice to eat it.
+                # "Nothing here works against" is the most these figures
+                # support.
+                title=f"Nothing here works against your recent results — {label.lower()}",
                 description=(
-                    f"{', '.join(helpers) or 'This product'} per 100g."
+                    f"{', '.join(helpers) or 'This product'} {basis}. "
+                    "That speaks to these readings only — it is not a verdict "
+                    "on whether the product is a good choice overall."
                 ),
                 impact=int(points),
             ))
@@ -1340,6 +1416,27 @@ def _evaluate_health_context(
         ))
 
     return flags, adjustment, level
+
+
+def _health_unit(nutrient: str) -> str:
+    """
+    Unit to print after a figure in a health flag, taken from the field name.
+
+    These messages read the numbers back to someone comparing them against
+    their own lab report, and were printing them bare: "sodium 11 per 100g",
+    "saturated fat 51 per 100g". Eleven what is not a detail when the reader
+    is deciding whether a figure is large.
+
+    Energy returns nothing, because its label is already "calories" and
+    "calories 717kcal" says it twice.
+    """
+    if nutrient.endswith("_kcal"):
+        return ""
+    if nutrient.endswith("_mcg"):
+        return "mcg"
+    if nutrient.endswith("_mg"):
+        return "mg"
+    return "g"
 
 
 _HEALTH_NUTRIENT_LABELS = {
@@ -1639,6 +1736,14 @@ def _calculate_nutritional_quality(
                     f"(high is >{_fmt(600 * sodium_scale)}mg).", -12))
         elif sodium > 400 * sodium_scale:
             score -= 5
+            # Said out loud, not just deducted. This band was silent, so a bag
+            # of crisps at 525mg lost five points and displayed nothing about
+            # salt anywhere — the user saw a score they could not account for,
+            # on the nutrient they would most expect to hear about.
+            if "sodium_mg" not in capped:
+                flags.append(SuitabilityFlag("warning", "nutrition", "Moderately high sodium",
+                    f"Contains {_fmt(sodium)}mg of sodium per 100g — not extreme, "
+                    "but it adds up quickly if you eat this often.", -5))
         elif sodium <= 200 * sodium_scale:
             if earns_absence_credit:
                 score += 10
@@ -1656,20 +1761,54 @@ def _calculate_nutritional_quality(
         hi = sat_bands["high"] if sat_bands else 5
         mid = sat_bands["mid"] if sat_bands else 3
         low = sat_bands["low"] if sat_bands else 1.5
-        basis = "per 100g" if sat_unit == "g" else "of its fat"
+        # Only the plain grams case needs a basis spelled out. Where a category
+        # supplies its own label it already carries one — "saturated fat
+        # (% of total fat)" — and appending another produced "63% saturated fat
+        # (% of total fat) of its fat".
+        basis = " per 100g" if sat_unit == "g" else ""
         if sat_fat > hi:
             score -= 10
             flags.append(SuitabilityFlag("warning", "nutrition", "High saturated fat",
-                f"Contains {_fmt(sat_fat)}{sat_unit} {sat_label} {basis}.", -10))
+                f"Contains {_fmt(sat_fat)}{sat_unit} {sat_label}{basis}.", -10))
         elif sat_fat > mid:
             score -= 3
         elif sat_fat <= low:
             if earns_absence_credit:
                 score += 10
                 flags.append(SuitabilityFlag("positive", "nutrition", "Low saturated fat",
-                    f"Only {_fmt(sat_fat)}{sat_unit} {sat_label} {basis}.", 10))
+                    f"Only {_fmt(sat_fat)}{sat_unit} {sat_label}{basis}.", 10))
         elif earns_absence_credit:
             score += 3  # Acceptable level
+
+    # ── Energy Density Assessment ──
+    #
+    # Until this existed the index scored sugar, sodium, saturated fat, protein
+    # and fibre, and nothing else — so a fried savoury snack at 536 kcal and
+    # 34g fat per 100g registered as an unremarkable food, collected a
+    # "low sugar" bonus for not being sweet, and scored 78. Energy density is
+    # the standard single proxy for that whole class: it catches fried, fatty
+    # and dense-carbohydrate products without needing a separate total-fat rule
+    # that would also punish nuts and olive oil, whose fat is the point.
+    #
+    # A category that has declared energy meaningless — a cooking oil, where
+    # every member is ~900 kcal and the figure separates nothing — has already
+    # had energy_kcal removed from the view, so this section skips it.
+    energy = nutrition.get("energy_kcal")
+    if energy is not None:
+        # Roughly the FSA's front-of-pack bands for solids. The credit half is
+        # gated on absence credit like every other bonus here, so a diet drink
+        # cannot earn points merely for containing nothing.
+        if energy > 400:
+            score -= 8
+            flags.append(SuitabilityFlag("warning", "nutrition", "Energy dense",
+                f"Contains {_fmt(energy)} kcal per 100g, which is high — "
+                "a small amount carries a lot of energy.", -8))
+        elif energy > 250:
+            score -= 3
+        elif energy <= 120 and earns_absence_credit:
+            score += 8
+            flags.append(SuitabilityFlag("positive", "nutrition", "Low energy density",
+                f"Only {_fmt(energy)} kcal per 100g.", 8))
 
     # ── Protein Assessment ──
     protein = nutrition.get("protein_g")
@@ -1755,9 +1894,18 @@ _WHOLE_FOODS = [
     "almond", "walnut", "cashew", "pistachio", "peanut", "seed", "flaxseed",
     "chia", "sunflower seed", "pumpkin seed", "vegetable", "spinach", "tomato",
     "carrot", "fruit", "date", "raisin", "apple", "banana", "berry", "milk",
-    "yogurt", "yoghurt", "egg", "olive oil", "water", "salt", "spice",
+    "yogurt", "yoghurt", "egg", "olive oil", "water", "spice",
     "cinnamon", "turmeric", "ginger", "garlic",
 ]
+# Deliberately NOT whole foods, despite reading like single natural ingredients:
+#
+#   salt — it was here, and it meant a bag of crisps collected a
+#   "whole-food ingredients" bonus for containing the very thing that makes it
+#   worth avoiding. Salt is scored where it belongs, as sodium, and counting it
+#   twice in the opposite direction cancelled out a real penalty.
+#
+# Sugar and refined oils are already in _REFINED_SUGARS / _REFINED_FATS, so
+# they are classified "poor" before this list is reached.
 # E-numbers (E100-E1999), the generic marker for an additive.
 _E_NUMBER = re.compile(r"\be\s?\d{3}\b")
 
@@ -2059,8 +2207,15 @@ def calculate_suitability(
     all_flags.extend(preference_flags)
 
     # ── Step 6: Health context from uploaded documents ──
+    # The health path gets the view WITHOUT derived values: its thresholds come
+    # from app.health.profiles and are absolute grams and milligrams, so it has
+    # to see grams. `not_applicable` still applies — a nutrient that carries no
+    # meaning for a category carries none here either.
+    health_view = _cat.apply_category_view(
+        product_nutrition, category_profile, include_derived=False
+    )
     health_flags, health_adjustment, health_level = _evaluate_health_context(
-        health_conditions or [], nutrition_view
+        health_conditions or [], health_view, category_profile, portion_g
     )
     all_flags.extend(health_flags)
 

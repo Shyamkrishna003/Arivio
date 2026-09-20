@@ -218,6 +218,12 @@ async def get_ai_report(
             user_goals=user_goals,
             user_allergies=user_allergies,
             user_feedback_examples=user_feedback_examples if user_feedback_examples else None,
+            # The engine already worked out how much of this kind of product a
+            # person uses at once. Passing it lets the report talk in pats of
+            # butter and spoons of soy sauce rather than in 100g of either.
+            # None for a category with no realistic portion, and the prompt
+            # then says nothing about portions at all.
+            reference_portion_g=suitability.breakdown.get("reference_portion_g"),
         )
     except Exception as e:
         import traceback
