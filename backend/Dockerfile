@@ -1,8 +1,10 @@
 # Backend — FastAPI + SQLAlchemy (async)
 #
-# Development-oriented image: source is bind-mounted by docker-compose and
-# uvicorn runs with --reload, so edits apply without a rebuild. Rebuild only
-# when requirements.txt changes.
+# One image for both development and deployment. Locally, docker-compose
+# bind-mounts the source and overrides the command with a reloading uvicorn, so
+# edits apply without a rebuild; rebuild only when requirements.txt changes.
+# Deployed, nothing overrides the command and start.sh below runs instead —
+# migrations, then uvicorn on the platform's $PORT, no reloader.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -27,6 +29,11 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
+# Re-applied here because a checkout on a filesystem without a permission bit
+# loses it, and the failure is a confusing "exec format"-adjacent error at boot.
+RUN chmod +x ./start.sh
+
+# Documentation only — the deployed port comes from $PORT at runtime.
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["./start.sh"]

@@ -33,9 +33,19 @@ if config.config_file_name is not None:
 # alembic.ini, so the same migrations run unchanged locally and in Docker
 # (where the database host is "postgres", not "localhost").
 from app.core.config import get_settings
+from app.db.url import normalize_database_url
 
-_db_url = os.environ.get("DATABASE_URL") or get_settings().DATABASE_URL
+_settings = get_settings()
+_db_url = os.environ.get("DATABASE_URL") or _settings.DATABASE_URL
+_connect_args: dict = {}
 if _db_url:
+    # Normalised exactly as the application engine is — migrations run on the
+    # same asyncpg driver, so a managed provider's libpq-shaped URL fails here
+    # too, and it fails mid-deploy where it is hardest to read.
+    _db_url, _connect_args = normalize_database_url(
+        _db_url,
+        prepared_statements=_settings.DATABASE_PREPARED_STATEMENTS,
+    )
     # set_main_option applies %-interpolation; escape so passwords survive.
     config.set_main_option("sqlalchemy.url", _db_url.replace("%", "%%"))
 
@@ -68,6 +78,7 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=_connect_args,
     )
 
     async with connectable.connect() as connection:
